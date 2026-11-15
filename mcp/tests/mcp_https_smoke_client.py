@@ -4,8 +4,7 @@
 
 """Client driver for the fractalsql-valkey-mcp direct-TLS mode.
 
-Driven by build_test.sh's gate_40_mcp_https (and the matching PowerShell
-gate): the gate itself generates the throwaway self-signed cert/key (via
+Driven by build_test.sh's gate_40_mcp_https: the gate itself generates the throwaway self-signed cert/key (via
 the openssl CLI) and skips the whole gate if openssl isn't on PATH; this
 driver only ever sees the resulting PEM paths.
 

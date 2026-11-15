@@ -6,8 +6,8 @@
  * Header-only SHA-256 + HMAC-SHA256 for the QTL ledger's MAC envelope.
  *
  * Why header-only / vendored (not OpenSSL/libcrypto): the extension must link
- * no extra library so it builds identically on MSVC (Windows) and gcc/clang
- * (Linux/macOS) with no Makefile OBJS / build-windows.ps1 source-list change,
+ * no extra library so it builds identically on gcc/clang
+ * (Linux/macOS) with no Makefile OBJS source-list change,
  * and does not depend on the server having been built --with-openssl. This
  * is the public-domain SHA-256 from Brad Conte's crypto-algorithms
  * (https://github.com/B-Con/crypto-algorithms), prefixed `fsql_` and made

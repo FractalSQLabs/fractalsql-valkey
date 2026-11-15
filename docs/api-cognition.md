@@ -78,10 +78,6 @@ It needs an embeddings endpoint (`embed_url` and `embed_model`). The result's le
 
 ---
 
-## Schema context and text-to-SQL
-
-`fractal_schema_context` and `fractal_text_to_sql` need a SQL engine and are **not available on Valkey**. See [text-to-sql-setup.md](text-to-sql-setup.md) for what to use instead.
-
 ## Errors
 
 | Error | Meaning |

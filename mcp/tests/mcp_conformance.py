@@ -1230,10 +1230,6 @@ def installed_layout_starts():
     target = os.path.join(install, os.path.basename(EXE))
     try:
         shutil.copy2(EXE, target)
-        for name in os.listdir(source_dir):
-            if name.lower().endswith(".dll"):
-                shutil.copy2(os.path.join(source_dir, name),
-                             os.path.join(install, name))
         for name in (".mcp-schema-lock", ".mcp-safety-annotations-lock"):
             source = os.path.join(LOCK_DIR, name)
             if os.path.exists(source):

@@ -8,12 +8,12 @@
 **Vector Search. Diverse Discovery. Production-Safe Analytics. All beside your data.**
 
 FractalSQL turns Valkey from a fast key-value store into a place where you can ask what
-your vectors *mean*: not only "what is closest", but "what distinct things are here", "did
+your vectors *mean*, and where agentic workflows can run beside your data: not only "what is closest", but "what distinct things are here", "did
 this series change regime", "is this agent going around in circles". It adds what a plain
 nearest-neighbour lookup structurally cannot, all inside the same server process, with
 FractalSQL statically linked and no runtime dependency beyond libc.
 
-By keeping search, discovery and analytics next to the data, FractalSQL enables
+By keeping search, discovery, analytics and agentic workflows next to the data, FractalSQL enables
 **Sovereign Data Intelligence**: the ability to reason about your data with the deployment
 topology under your control. Run fully on-prem or in your own containers, with a local
 model (Ollama, vLLM) for zero data egress, or point at your organisation's own cloud AI
@@ -69,10 +69,7 @@ Every command is an ordinary Valkey command. Vectors are packed little-endian fl
 BLOBs in ordinary string keys, so there is no new data type, nothing extra in your RDB or AOF,
 and nothing for a replica to do differently.
 
-Valkey has no SQL layer, so two SQL-bound parts of the other FractalSQL editions have no equivalent here:
-**text-to-SQL** and the **vectorizer**. Each has a page that says so plainly and says what to use instead:
-[Text-to-SQL](docs/text-to-sql-setup.md), [Vectorizer](docs/vectorizer-setup.md). The question-answering
-agent (`DATA_ANALYST`) is there too, but it asks valkey-search for a query expression rather than writing SQL. FractalSQL is not a vector index either: for nearest-neighbour search
+The question-answering agent (`DATA_ANALYST`) asks valkey-search for a query expression. FractalSQL is not a vector index either: for nearest-neighbour search
 at scale use valkey-search beside it (see [Features](docs/features.md#-benchmarks--scaling)).
 
 ---
@@ -93,8 +90,7 @@ python3 demo/demo-vertical-semantic-cache.py --port 6379
 
 Native installers: `.deb` / `.rpm` for Linux amd64/arm64, an `.apk` for musl (Alpine), and
 an archive for macOS (arm64/x86_64). The floor is **glibc 2.34** (Ubuntu 22.04+, Debian 12+,
-RHEL 9+). Platforms are Linux and macOS; there is no Windows build, because Valkey has no native
-Windows server. No telemetry; everything stays local.
+RHEL 9+). Platforms are Linux and macOS. No telemetry; everything stays local.
 
 ---
 
@@ -140,8 +136,6 @@ For enterprise editions, licensing, and support, contact **enterprise@fractalsql
 - **[Composition Guide](docs/composition-guide.md)**: build your own workflow from the commands.
 - **[Features](docs/features.md)**: the full Capability Map and command index.
 - **[Reasoning Setup](docs/reasoning-setup.md)**: LLM provider configuration (Ollama, vLLM, OpenAI-compatible).
-- **[Text-to-SQL Setup](docs/text-to-sql-setup.md)**: not provided on Valkey, and what to use instead.
-- **[Vectorizer Setup](docs/vectorizer-setup.md)**: not provided on Valkey; `FRACTAL.EMBED` is.
 - **[MCP Plugin](docs/mcp-plugin.md)**: use FractalSQL from Claude Desktop, Cursor, Windsurf, LangChain, LlamaIndex, CrewAI, and many more MCP clients.
 - **[FractalSQL Daemon](docs/fractalsql-daemon.md)**: running `fractalsqld`, its config file, and what a daemon failure does (and doesn't) do to your server.
 - **[Docker Demo](docs/docker-demo.md)**: a one-command end-to-end demo.

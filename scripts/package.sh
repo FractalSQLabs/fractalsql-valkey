@@ -190,6 +190,9 @@ fpm -s dir -t deb \
     --iteration "${ITERATION}" \
     --description "${DESC}" \
     --license "Apache-2.0 AND BSD-2-Clause" \
+    --maintainer "FractalSQLabs" \
+    --vendor "FractalSQLabs" \
+    --url "https://github.com/FractalSQLabs/fractalsql-valkey" \
     --depends "libc6 (>= ${GLIBC_DEP})" \
     --depends "valkey-server" \
     --deb-suggests "fractalsqld-valkey" \
@@ -206,6 +209,9 @@ fpm -s dir -t rpm \
     --iteration "${ITERATION}" \
     --description "${DESC}" \
     --license "Apache-2.0 AND BSD-2-Clause" \
+    --maintainer "FractalSQLabs" \
+    --vendor "FractalSQLabs" \
+    --url "https://github.com/FractalSQLabs/fractalsql-valkey" \
     --depends "valkey" \
     --config-files /etc/valkey/modules-available/fractalsql.conf \
     --after-install "${REPO_ROOT}/packaging/debian/postinst" \
@@ -224,6 +230,9 @@ fpm -s dir -t apk \
     --iteration "${ITERATION}" \
     --description "${DESC}" \
     --license "Apache-2.0 AND BSD-2-Clause" \
+    --maintainer "FractalSQLabs" \
+    --vendor "FractalSQLabs" \
+    --url "https://github.com/FractalSQLabs/fractalsql-valkey" \
     --depends "valkey" \
     --config-files /etc/valkey/modules-available/fractalsql.conf \
     --after-install "${REPO_ROOT}/packaging/debian/postinst" \
@@ -296,6 +305,9 @@ if [[ "${PROFILE}" != "musl" ]]; then
         --iteration "${ITERATION}" \
         --description "${D_DESC}" \
         --license "Apache-2.0" \
+        --maintainer "FractalSQLabs" \
+        --vendor "FractalSQLabs" \
+        --url "https://github.com/FractalSQLabs/fractalsql-valkey" \
         --depends "libc6 (>= ${GLIBC_DEP})" \
         --depends "libcurl4 | libcurl4t64" \
         --depends "libssl3 | libssl3t64" \
@@ -314,6 +326,9 @@ if [[ "${PROFILE}" != "musl" ]]; then
         --iteration "${ITERATION}" \
         --description "${D_DESC}" \
         --license "Apache-2.0" \
+        --maintainer "FractalSQLabs" \
+        --vendor "FractalSQLabs" \
+        --url "https://github.com/FractalSQLabs/fractalsql-valkey" \
         --depends "libcurl.so.4()(64bit)" \
         --depends "libcrypto.so.3()(64bit)" \
         --depends "openssl-libs" \
@@ -336,6 +351,9 @@ else
         --iteration "${ITERATION}" \
         --description "${D_DESC}" \
         --license "Apache-2.0" \
+        --maintainer "FractalSQLabs" \
+        --vendor "FractalSQLabs" \
+        --url "https://github.com/FractalSQLabs/fractalsql-valkey" \
         --depends "libcurl" \
         --depends "libcrypto3" \
         --depends "libssl3" \

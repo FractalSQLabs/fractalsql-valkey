@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal OpenAI-compatible chat-completions AND embeddings mock, for
-build_test.sh's reasoning-tier gates (fractal_reason/fractal_embed/
-fractal_text_to_sql/fractal_sql_agent/the vectorizer/the Agency tier)
+build_test.sh's reasoning-tier gates (FRACTAL.REASON/FRACTAL.EMBED/
+the Agency tier)
 without a real LLM endpoint.
 
 Routes on the request PATH (anything containing "embed" -> embeddings
@@ -28,7 +28,7 @@ demand, deterministic, and already covers that logic thoroughly
 without needing a second mock reply mode.
 
 Serves a fixed chat reply plus an embeddings route that this repo's
-Vectorizer/fractal_embed gates
+FRACTAL.EMBED gates
 need (the reasoning-VFS-ABI test fixtures prove the plugin-ABI path
 directly; this HTTP mock covers the real dlopen/curl/HTTP path -- see
 build_test.sh's reasoning-gates header comment for why each restarts

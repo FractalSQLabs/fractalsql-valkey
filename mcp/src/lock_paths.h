@@ -6,7 +6,7 @@
 // The default lock paths used to be relative to the process CWD, so a server started
 // from any other directory silently ran with NO lock check. A relative path that does
 // not exist in the CWD now falls back to the directory holding the executable. Every package
-// installs the two lock files beside the binary (and Windows installers and archives do the same),
+// installs the two lock files beside the binary (and archives do the same),
 // so that directory is the one place an installed server looks. A missing lock is reported
 // (and refused unless FSQL_MCP_ALLOW_MISSING_LOCKS=true) instead of being silently treated
 // as a pass.
@@ -15,21 +15,12 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
-#if defined( _WIN32 )
-// windows.h defines function-like min()/max() macros unless NOMINMAX is set; they rewrite
-// std::min/std::max into "std::(...)" and fail to compile (C2589).
-#  ifndef NOMINMAX
-#    define NOMINMAX
-#  endif
-#  include <windows.h>
-#else
 #  include <unistd.h>
 #  include <limits.h>
 #  include <stdlib.h>
 #  if defined( __APPLE__ )
 #    include <mach-o/dyld.h>
 #  endif
-#endif
 
 namespace fsqlmcp
 {
@@ -37,11 +28,7 @@ namespace fsqlmcp
     // Linux exposes it as /proc/self/exe; macOS has no /proc and uses _NSGetExecutablePath.
     inline std::string selfExecutablePath()
     {
-#if defined( _WIN32 )
-        char buf[ 4096 ];
-        const DWORD n = GetModuleFileNameA( nullptr, buf, sizeof buf );
-        return std::string( buf, n ? n : 0 );
-#elif defined( __APPLE__ )
+#if defined( __APPLE__ )
         char raw[ PATH_MAX ];
         uint32_t size = sizeof raw;
         if( _NSGetExecutablePath( raw, &size ) != 0 ) return std::string();
@@ -57,11 +44,7 @@ namespace fsqlmcp
     inline std::string selfDirectory()
     {
         const std::string p = selfExecutablePath();
-#if defined( _WIN32 )
-        const std::size_t cut = p.find_last_of( "\\/" );
-#else
         const std::size_t cut = p.find_last_of( '/' );
-#endif
         return cut == std::string::npos ? std::string() : p.substr( 0, cut );
     }
 

@@ -85,11 +85,7 @@ clamp_to_int(long long v)
 #define SUBSET_MAX_WORK         (16777216ULL)
 #define PERIODOGRAM_MAX_SAMPLES ((size_t) 1048576)
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-#  define FRACTAL_EXPORT __declspec(dllexport)
-#else
 #  define FRACTAL_EXPORT
-#endif
 
 /* Single source of truth for the shipped version. fractal_version()
  * below returns this, and scripts/package.sh derives the .deb/.rpm
@@ -98,14 +94,9 @@ clamp_to_int(long long v)
  * metadata's version silently drifting apart. */
 #define FSQL_VERSION "2.0.11"
 
-/* strncasecmp is POSIX (<strings.h>), not standard C. MSVC has no
- * <strings.h> at all, only the underscore-prefixed _strnicmp. Used by
+/* strncasecmp is POSIX (<strings.h>), not standard C. Used by
  * fractal_feedback_report's kind-string parser below. */
-#if defined(_MSC_VER)
-#  define strncasecmp _strnicmp
-#else
 #  include <strings.h>
-#endif
 
 /* Supply-side DoS guards, sized the same way as the redis/valkey blob
  * caps elsewhere in this codebase.
@@ -449,7 +440,7 @@ json_get_int(const char *s, size_t slen, const char *key, int fallback)
      * The bounds are spelled INT_MAX/INT_MIN rather than as the
      * literals 2147483647L / -2147483648L: 2147483648 does not fit in
      * a 32-bit long, so on a compiler that types an out-of-range
-     * decimal constant with an L suffix as unsigned long (MSVC), the
+     * decimal constant with an L suffix as unsigned long, the
      * negated literal is 2147483648UL and the comparison below runs in
      * unsigned arithmetic -- where every non-negative value is
      * "less than" it, and every parsed number was thrown away in favour

@@ -28,40 +28,7 @@
 #include "fractalsql_interrupt.h"  /* src/: the cancel seams the UDF bodies poll */
 #include "fractalsql_provider.h"   /* src/: the conf -> provider-consumer push */
 
-/* Platform layer: AF_UNIX + pthreads on POSIX, a named pipe + Win32
- * threads on Windows. Everything below this block is shared. */
-#ifdef _WIN32
-#  define WIN32_LEAN_AND_MEAN
-#  include <Windows.h>
-#  include <process.h>
-#  include <sddl.h>
-#  include <aclapi.h>
-#  define FSQ_PRINTF(fmt_idx, arg_idx)
-#  define FSQ_TLS __declspec(thread)
-#  define FSQ_CONFIG_DEFAULT "C:\\ProgramData\\FractalSQL\\fractalsqld.conf"
-#  define FSQ_PIPE_PREFIX "\\\\.\\pipe\\"
-#  define FSQ_SLEEP_MS(ms) Sleep(ms)
-#  define FSQ_THREAD_RET unsigned __stdcall
-#  define FSQ_THREAD_EXIT 0
-#  define fsq_strtok_r strtok_s
-#  define fsq_pid() ((long) GetCurrentProcessId())
-#  define EWOULDBLOCK EAGAIN
-typedef SRWLOCK fsq_mutex;
-#  define FSQ_MUTEX_INIT SRWLOCK_INIT
-#  define FSQ_LOCK(m) AcquireSRWLockExclusive(&(m))
-#  define FSQ_UNLOCK(m) ReleaseSRWLockExclusive(&(m))
-typedef HANDLE fsq_sock;
-#  define FSQ_SOCK_INVALID INVALID_HANDLE_VALUE
-#  define FSQ_SOCK_VALID(s) ((s) != INVALID_HANDLE_VALUE)
-#  define FSQ_SDDL_MAX 4096
-#  define FSQ_SID_MAX 128
-/* Handle cancel flags are written under g_handles_mu but read lock-free
- * from the connection thread mid-call (and inside the interrupt hook), so
- * they live in the platform's smallest atomic. */
-typedef volatile LONG fsq_atomic_int;
-#  define FSQ_ATOMIC_GET(p)   InterlockedOr((p), 0)
-#  define FSQ_ATOMIC_SET(p,v) InterlockedExchange((p), (LONG)(v))
-#else
+/* Platform layer: AF_UNIX sockets and pthreads. */
 #  include <pthread.h>
 #  include <sys/socket.h>
 #  include <sys/un.h>
@@ -81,11 +48,9 @@ typedef pthread_mutex_t fsq_mutex;
 typedef int fsq_sock;
 #  define FSQ_SOCK_INVALID (-1)
 #  define FSQ_SOCK_VALID(s) ((s) >= 0)
-/* Same atomic contract as the Windows branch above. */
 typedef volatile int fsq_atomic_int;
 #  define FSQ_ATOMIC_GET(p)   __atomic_load_n((p), __ATOMIC_SEQ_CST)
 #  define FSQ_ATOMIC_SET(p,v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
-#endif
 
 #define FSQL_DAEMON_VERSION     "2.0.11"
 #define FSQ_CONFIG_ENV          "FRACTALSQL_CONFIG"
@@ -99,11 +64,7 @@ struct fsq_config {
     char socket_path[256];
     char key_path[512];
     char log_path[512];
-#ifdef _WIN32
-    char allowed_sids[FSQ_MAX_ALLOWED_UIDS][FSQ_SID_MAX];
-#else
     uid_t allowed_uids[FSQ_MAX_ALLOWED_UIDS];
-#endif
     size_t n_allowed;
     uint8_t key[64];
     size_t key_len;
@@ -149,24 +110,6 @@ struct fsq_reply {
 static volatile sig_atomic_t g_stop = 0;
 static fsq_sock g_listen_fd = FSQ_SOCK_INVALID;
 
-/* Coverage-profile flushing (see the block near the bottom of this
- * file). Declared up here because the request path calls the tick
- * before the block's definition.
- *
- * Only the TICK exists on POSIX: the daemon there is stopped with
- * SIGTERM and exits normally, so gcov's own atexit hook writes the
- * profile and there is nothing to flush by hand. The init/now pair
- * exist only on Windows, where the harness stops the daemon with a
- * hard kill that skips the CRT exit handlers -- so those two are
- * declared (and defined) under _WIN32, and a POSIX build never sees
- * them at all. Leaving the POSIX stubs in place without their call
- * sites is a -Werror=unused-function build failure. */
-static void coverage_flush_tick(void);
-#if defined(_WIN32)
-static void coverage_flush_init(void);
-static void coverage_flush_now(void);
-#endif
-
 /* One line per event on stderr, which the container runtime collects.
  * Payloads and query text are never logged; only opcodes, sizes,
  * peer uids and the adapter's own error text. */
@@ -176,19 +119,11 @@ static void fsq_log(const char *level, const char *fmt, ...) FSQ_PRINTF(2, 3);
 static void fsq_log(const char *level, const char *fmt, ...) {
     char ts[32], msg[768];
     va_list ap;
-#ifdef _WIN32
-    SYSTEMTIME st;
-    GetSystemTime(&st);
-    snprintf(ts, sizeof(ts), "%04u-%02u-%02uT%02u:%02u:%02uZ",
-             (unsigned) st.wYear, (unsigned) st.wMonth, (unsigned) st.wDay,
-             (unsigned) st.wHour, (unsigned) st.wMinute, (unsigned) st.wSecond);
-#else
     struct timespec now;
     struct tm tmv;
     clock_gettime(CLOCK_REALTIME, &now);
     gmtime_r(&now.tv_sec, &tmv);
     strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);
-#endif
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
@@ -236,30 +171,6 @@ static int load_key(struct fsq_config *cfg) {
     return 0;
 }
 
-#ifdef _WIN32
-/* The SID of the account the daemon runs as: the default allow-list. */
-static int process_user_sid(char *out, size_t outlen) {
-    HANDLE tok = NULL;
-    DWORD need = 0;
-    TOKEN_USER *tu = NULL;
-    char *sidstr = NULL;
-    int ok = 0;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return -1;
-    GetTokenInformation(tok, TokenUser, NULL, 0, &need);
-    tu = malloc(need ? need : 1);
-    if (tu && GetTokenInformation(tok, TokenUser, tu, need, &need) &&
-        ConvertSidToStringSidA(tu->User.Sid, &sidstr)) {
-        if (strlen(sidstr) < outlen) {
-            strcpy(out, sidstr);
-            ok = 1;
-        }
-        LocalFree(sidstr);
-    }
-    free(tu);
-    CloseHandle(tok);
-    return ok ? 0 : -1;
-}
-#endif
 
 /* Case-insensitive equality against a lower-case ASCII word. */
 static int cfg_word_is(const char *v, const char *word) {
@@ -325,22 +236,12 @@ static int load_config(const char *path, struct fsq_config *cfg) {
             cfg->max_connections = atoi(v);
         } else if (strcmp(k, "idle_timeout_secs") == 0) {
             cfg->idle_timeout_secs = atoi(v);
-#ifdef _WIN32
-        } else if (strcmp(k, "allowed_pipe_sid") == 0) {
-            char *save = NULL;
-            for (char *tok = fsq_strtok_r(v, ",", &save); tok; tok = fsq_strtok_r(NULL, ",", &save)) {
-                while (*tok == ' ') tok++;
-                if (cfg->n_allowed >= FSQ_MAX_ALLOWED_UIDS || strlen(tok) >= FSQ_SID_MAX) { fclose(f); return -1; }
-                strcpy(cfg->allowed_sids[cfg->n_allowed++], tok);
-            }
-#else
         } else if (strcmp(k, "allowed_uids") == 0) {
             char *save = NULL;
             for (char *tok = fsq_strtok_r(v, ",", &save); tok; tok = fsq_strtok_r(NULL, ",", &save)) {
                 if (cfg->n_allowed >= FSQ_MAX_ALLOWED_UIDS) { fclose(f); return -1; }
                 cfg->allowed_uids[cfg->n_allowed++] = (uid_t) strtoul(tok, NULL, 10);
             }
-#endif
         /* Provider keys (fractalsql_provider.h). Parse is lenient here;
          * validate_provider_cfg does the loud, specific range checks a
          * deliberate file edit deserves -- and it knows which keys were
@@ -418,19 +319,8 @@ static int load_config(const char *path, struct fsq_config *cfg) {
     }
     fclose(f);
     if (cfg->socket_path[0] == '\0' || cfg->key_path[0] == '\0') return -1;
-#ifdef _WIN32
-    if (strncmp(cfg->socket_path, FSQ_PIPE_PREFIX, strlen(FSQ_PIPE_PREFIX)) != 0) return -1;
-    if (cfg->n_allowed == 0 && process_user_sid(cfg->allowed_sids[0], FSQ_SID_MAX) == 0) cfg->n_allowed = 1;
-    if (cfg->n_allowed == 0) return -1;
-    for (size_t i = 0; i < cfg->n_allowed; i++) {
-        PSID sid;
-        if (!ConvertStringSidToSidA(cfg->allowed_sids[i], &sid)) return -1;
-        LocalFree(sid);
-    }
-#else
     if (strlen(cfg->socket_path) >= sizeof(((struct sockaddr_un *)0)->sun_path)) return -1;
     if (cfg->n_allowed == 0) cfg->allowed_uids[cfg->n_allowed++] = geteuid();
-#endif
     if (cfg->max_connections <= 0 || cfg->max_connections > FSQ_MAX_CONNECTIONS_LIMIT) return -1;
     if (cfg->idle_timeout_secs <= 0) return -1;
     return load_key(cfg);
@@ -445,10 +335,6 @@ static int load_config(const char *path, struct fsq_config *cfg) {
  * reload can never publish a config the daemon would refuse at boot.
  * Defined per platform below (the key-file privacy check differs). */
 static int validate_cfg(const struct fsq_config *cfg);
-#ifdef _WIN32
-static int build_pipe_sd(const struct fsq_config *cfg);
-static int key_file_private(const char *path);
-#endif
 
 /* One immutable configuration under a refcount. run_listener and every
  * serve thread borrow the config they read; RELOAD swaps in a fresh
@@ -501,22 +387,6 @@ static int cfg_publish(const struct fsq_config *cfg) {
 }
 
 /* Platform-specific checks a config must pass before this daemon runs it. */
-#ifdef _WIN32
-static int validate_cfg(const struct fsq_config *cfg) {
-    /* The config file carries provider secrets once reasoning_token /
-     * enterprise_ledger_key are populated, so it must be as private as
-     * the key file. */
-    if (g_config_path && !key_file_private(g_config_path)) {
-        fsq_log("ERROR", "config file %s grants access to Everyone, Authenticated Users or Users: restrict it to the service account", g_config_path);
-        return -1;
-    }
-    if (!key_file_private(cfg->key_path)) {
-        fsq_log("ERROR", "hmac_key_file %s grants access to Everyone, Authenticated Users or Users: restrict it to the service account", cfg->key_path);
-        return -1;
-    }
-    return 0;
-}
-#else
 static int validate_cfg(const struct fsq_config *cfg) {
     struct stat kst, cst;
     if (g_config_path && stat(g_config_path, &cst) == 0 && (cst.st_mode & 0007) != 0) {
@@ -529,7 +399,6 @@ static int validate_cfg(const struct fsq_config *cfg) {
     }
     return 0;
 }
-#endif
 
 /* Loud, specific validation of the provider keys in a parsed config
  * (fractalsql_provider.h). A config-file edit is a deliberate act, so
@@ -740,64 +609,6 @@ static int daemon_apply_provider(const struct fsq_config *cfg) {
 /* Frame I/O                                                           */
 /* ------------------------------------------------------------------ */
 
-#ifdef _WIN32
-/* Per-connection idle timeout, set by the thread that serves the pipe. */
-static FSQ_TLS DWORD t_io_timeout_ms = 300000;
-
-static void fsq_set_idle(fsq_sock s, int secs) {
-    (void) s;
-    t_io_timeout_ms = (DWORD) secs * 1000u;
-}
-
-static void fsq_close(fsq_sock s) {
-    if (FSQ_SOCK_VALID(s)) CloseHandle(s);
-}
-
-/* Overlapped transfer bounded by the idle timeout. Timeouts report EAGAIN,
- * the same errno the POSIX path reports, so the caller logs them alike. */
-static int fsq_xfer(fsq_sock s, void *buf, DWORD n, int writing) {
-    OVERLAPPED ov;
-    DWORD got = 0;
-    BOOL ok;
-    memset(&ov, 0, sizeof(ov));
-    ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-    if (!ov.hEvent) return -1;
-    ok = writing ? WriteFile(s, buf, n, NULL, &ov) : ReadFile(s, buf, n, NULL, &ov);
-    if (!ok) {
-        if (GetLastError() != ERROR_IO_PENDING) { CloseHandle(ov.hEvent); return -1; }
-        if (WaitForSingleObject(ov.hEvent, t_io_timeout_ms) != WAIT_OBJECT_0) {
-            CancelIoEx(s, &ov);
-            WaitForSingleObject(ov.hEvent, INFINITE);
-            CloseHandle(ov.hEvent);
-            errno = EAGAIN;
-            return -1;
-        }
-    }
-    ok = GetOverlappedResult(s, &ov, &got, FALSE);
-    CloseHandle(ov.hEvent);
-    return ok ? (int) got : -1;
-}
-
-static int read_all(fsq_sock s, uint8_t *p, size_t n) {
-    while (n > 0) {
-        int r = fsq_xfer(s, p, (DWORD) n, 0);
-        if (r <= 0) return -1;
-        p += r;
-        n -= (size_t) r;
-    }
-    return 0;
-}
-
-static int write_all(fsq_sock s, const uint8_t *p, size_t n) {
-    while (n > 0) {
-        int w = fsq_xfer(s, (void *) p, (DWORD) n, 1);
-        if (w <= 0) return -1;
-        p += w;
-        n -= (size_t) w;
-    }
-    return 0;
-}
-#else
 static void fsq_set_idle(fsq_sock fd, int secs) {
     struct timeval idle;
     idle.tv_sec = secs;
@@ -838,7 +649,6 @@ static int write_all(fsq_sock fd, const uint8_t *p, size_t n) {
     }
     return 0;
 }
-#endif
 
 static void mac(const struct fsq_config *cfg, const uint8_t *hdr,
                 const uint8_t *payload, size_t plen, uint8_t tag[FSQ_TAG_LEN]) {
@@ -1555,38 +1365,8 @@ static void handle_reload(const struct fsq_config *cur, struct fsq_reply *rep) {
         set_text(rep, FSQ_ERR_ARGS, "reload failed: provider settings rejected (see the daemon log)");
         return;
     }
-#ifdef _WIN32
-    {
-        int sids_changed = next.n_allowed != cur->n_allowed;
-        for (size_t i = 0; !sids_changed && i < next.n_allowed; i++)
-            sids_changed = _stricmp(next.allowed_sids[i], cur->allowed_sids[i]) != 0;
-        if (sids_changed && build_pipe_sd(&next) != 0) {
-            fsq_log("WARN", "reload: cannot rebuild the pipe security descriptor from the new allowed_pipe_sid; keeping the running configuration");
-            set_text(rep, FSQ_ERR_ARGS, "reload failed: cannot rebuild the pipe security descriptor");
-            return;
-        }
-        /* If the list changed, g_pipe_sd now points at the new descriptor
-         * while this reload could still fail below -- harmless: the new SD
-         * reflects only allow-list entries the new config carries anyway. */
-        if (next.log_path[0] && strcmp(next.log_path, cur->log_path) != 0) {
-            FILE *nf = fopen(next.log_path, "a");
-            if (!nf) {
-                fsq_log("WARN", "reload: cannot open the new log file %s; keeping the running configuration", next.log_path);
-                set_text(rep, FSQ_ERR_ARGS, "reload failed: cannot open the new log file");
-                return;
-            }
-            /* The old FILE* is deliberately left open, not fclose()d: a
-             * concurrent fsq_log on another connection thread may be
-             * mid-write to it. Closing under the writer is a crash, a
-             * bounded stale-stream leak is not. New lines go to the new
-             * file from here on. */
-            g_logf = nf;
-        }
-    }
-#else
     /* POSIX logs to stderr (the container runtime collects it); log_file
      * is parsed into the config but carries no runtime effect here. */
-#endif
     /* Apply the provider push AFTER the SD/log swap, BEFORE publishing:
      * each consumer swaps its effective settings under its own lock (with
      * per-consumer rollback) and clears its tiers' plugin-loaded flags;
@@ -1661,95 +1441,11 @@ struct conn_arg {
 };
 
 /* Fills peer with a log-safe description of the caller and reports whether
- * the caller is on the allow-list, against allowed_uids (allowed_pipe_sid
- * on Windows). Linux checks SO_PEERCRED/struct ucred; Darwin has neither,
- * so it uses getpeereid() instead. Windows reads the client's token off
- * its process (by PID, via GetNamedPipeClientProcessId), falling back to
- * ImpersonateNamedPipeClient when the process can't be opened (see the
- * comment at the fallback below); impersonation needs SeImpersonatePrivilege
- * -- a privilege a service logon holds by default but a plain interactive
- * account lacks, even one in Administrators (UAC gives it a filtered
- * token). So under an interactive daemon, a cross-account client can only
- * be vetted when its process is openable. */
+ * the caller is on the allow-list, against allowed_uids. Linux checks
+ * SO_PEERCRED/struct ucred; Darwin has neither, so it uses getpeereid()
+ * instead. */
 static int peer_allowed(fsq_sock fd, const struct fsq_config *cfg, char *peer, size_t peerlen) {
-#ifdef _WIN32
-    ULONG pid = 0;
-    HANDLE proc = NULL, tok = NULL;
-    DWORD need = 0;
-    TOKEN_USER *tu = NULL;
-    char *sidstr = NULL;
-    int ok = 0;
-    peer[0] = '\0';
-    if (!GetNamedPipeClientProcessId(fd, &pid)) {
-        snprintf(peer, peerlen, "unknown peer (pid lookup failed, error %lu)",
-                 (unsigned long) GetLastError());
-        return 0;
-    }
-    proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD) pid);
-    if (!proc) {
-        DWORD open_err = GetLastError();
-        /* Cross-service open can be refused outright: a service token's
-         * default DACL grants process-query rights to its OWN service SID
-         * and to SYSTEM/Administrators, and nothing else -- confirmed
-         * live: the daemon (LOCAL SERVICE) could not open the host server
-         * running as a different NT SERVICE\<name> account (error 5), so
-         * it refused every connection from that server and the shim saw
-         * only "bad response frame from fractalsqld". Fall back to
-         * impersonating the pipe client: the connection has already
-         * passed the pipe DACL (which grants only the allow-listed
-         * SIDs), service logons hold SeImpersonatePrivilege by default,
-         * and this obtains the caller's token user -- the same data the
-         * OpenProcess+OpenProcessToken path above would have provided --
-         * so the allow-list comparison is unchanged. The header
-         * comment's interactive-daemon caveat still applies: without
-         * SeImpersonatePrivilege the fallback refuses and the peer
-         * string below says exactly what failed. */
-        if (ImpersonateNamedPipeClient(fd)) {
-            if (OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, FALSE, &tok) && tok) {
-                GetTokenInformation(tok, TokenUser, NULL, 0, &need);
-                tu = malloc(need ? need : 1);
-                if (tu && GetTokenInformation(tok, TokenUser, tu, need, &need) &&
-                    ConvertSidToStringSidA(tu->User.Sid, &sidstr)) {
-                    snprintf(peer, peerlen, "pid %lu sid %s",
-                             (unsigned long) pid, sidstr);
-                    for (size_t i = 0; i < cfg->n_allowed && !ok; i++)
-                        if (_stricmp(cfg->allowed_sids[i], sidstr) == 0) ok = 1;
-                    LocalFree(sidstr);
-                }
-                free(tu);
-                tu = NULL;
-                CloseHandle(tok);
-                tok = NULL;
-            }
-            RevertToSelf();
-        }
-        if (peer[0] == '\0') {
-            snprintf(peer, peerlen,
-                     "pid %lu (process open failed, error %lu, impersonation fallback refused, error %lu)",
-                     (unsigned long) pid,
-                     (unsigned long) open_err,
-                     (unsigned long) GetLastError());
-        }
-        return ok;
-    }
-    if (OpenProcessToken(proc, TOKEN_QUERY, &tok)) {
-        GetTokenInformation(tok, TokenUser, NULL, 0, &need);
-        tu = malloc(need ? need : 1);
-        if (tu && GetTokenInformation(tok, TokenUser, tu, need, &need) &&
-            ConvertSidToStringSidA(tu->User.Sid, &sidstr)) {
-            snprintf(peer, peerlen, "pid %lu sid %s", (unsigned long) pid, sidstr);
-            for (size_t i = 0; i < cfg->n_allowed && !ok; i++)
-                if (_stricmp(cfg->allowed_sids[i], sidstr) == 0) ok = 1;
-            LocalFree(sidstr);
-        }
-        free(tu);
-        CloseHandle(tok);
-    }
-    CloseHandle(proc);
-    if (peer[0] == '\0') snprintf(peer, peerlen, "pid %lu (token lookup failed, error %lu)",
-                                   (unsigned long) pid, (unsigned long) GetLastError());
-    return ok;
-#elif defined(__APPLE__)
+#if defined(__APPLE__)
     /* Darwin has no SO_PEERCRED/struct ucred (that pair is Linux-only).
      * getpeereid() is the BSD equivalent: it reads the credentials of
      * the process on the other end of a connected AF_UNIX socket
@@ -1891,7 +1587,6 @@ static FSQ_THREAD_RET serve_connection_body(void *arg) {
         }
 
         dispatch(cfg, &h, payload, h.payload_len, &rep);
-        coverage_flush_tick();
         free(payload);
         if (rep.status != FSQ_OK)
             fsq_log("WARN", "opcode 0x%04x failed: status %u, core rc %d, %.200s",
@@ -1932,126 +1627,6 @@ static FSQ_THREAD_RET serve_connection(void *arg) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Coverage-profile flushing (instrumented Windows builds only)       */
-/* ------------------------------------------------------------------ */
-/*                                                                    */
-/* WHY THIS EXISTS:                                                  */
-/*   The LLVM coverage runtime writes its .profraw file at NORMAL     */
-/*   PROCESS EXIT. The Windows harness stops fractalsqld with a hard   */
-/*   kill (Stop-Process -Force), which does NOT run the CRT's exit    */
-/*   handlers -- so an instrumented daemon would leave no profile      */
-/*   behind and the Windows coverage report would come out empty.     */
-/*                                                                    */
-/*   The POSIX side has no such problem: there the harness stops the  */
-/*   daemon with SIGTERM, the daemon's signal handler unwinds the     */
-/*   listener cleanly, the process exits normally, and gcov's own      */
-/*   atexit hook writes the .gcda. The Windows daemon has no such      */
-/*   signal, so it flushes the profile ITSELF, periodically, while it  */
-/*   is running.                                                      */
-/*                                                                    */
-/*   The two runtime entry points are resolved DYNAMICALLY            */
-/*   (GetProcAddress), so a build without the coverage runtime -- the */
-/*   normal MSVC build -- has no link-time dependency on it at all,   */
-/*   and the whole feature is dormant unless the harness sets         */
-/*   FRACTALSQL_PROFILE_FLUSH_MS.                                    */
-/*                                                                    */
-/*   The write is followed by a counter RESET, which is what makes the */
-/*   numbers right: the runtime MERGES each write into the file it    */
-/*   already wrote, so a write of the running totals would be added   */
-/*   to the running totals again, once per flush. Writing the delta   */
-/*   and resetting leaves the file holding the run's true totals.     */
-/* ------------------------------------------------------------------ */
-#if defined(_WIN32)
-typedef int  (*fsq_prof_write_fn)(void);
-typedef void (*fsq_prof_reset_fn)(void);
-
-static fsq_prof_write_fn g_prof_write = NULL;
-static fsq_prof_reset_fn g_prof_reset = NULL;
-static DWORD             g_prof_interval_ms = 0;
-static DWORD             g_prof_next_ms = 0;
-static CRITICAL_SECTION  g_prof_lock;
-static int               g_prof_lock_ready = 0;
-
-static void
-coverage_flush_init(void)
-{
-    const char *iv = getenv("FRACTALSQL_PROFILE_FLUSH_MS");
-    long        ms;
-    HMODULE     self;
-    FARPROC     w, r;
-
-    if (iv == NULL || *iv == '\0') return;
-    ms = strtol(iv, NULL, 10);
-    if (ms <= 0) return;
-
-    self = GetModuleHandleA(NULL);
-    if (self == NULL) return;
-    /* Both symbols exist only in a build that links the LLVM coverage
-     * runtime (clang-cl -fprofile-instr-generate). A normal MSVC build
-     * has neither, and simply never flushes. */
-    w = GetProcAddress(self, "__llvm_profile_write_file");
-    r = GetProcAddress(self, "__llvm_profile_reset_counters");
-    if (w == NULL || r == NULL) {
-        fsq_log("WARN", "FRACTALSQL_PROFILE_FLUSH_MS is set but this build has no coverage runtime; ignoring it");
-        return;
-    }
-    g_prof_write       = (fsq_prof_write_fn) (void *) w;
-    g_prof_reset       = (fsq_prof_reset_fn) (void *) r;
-    g_prof_interval_ms = (DWORD) ms;
-    InitializeCriticalSection(&g_prof_lock);
-    g_prof_lock_ready = 1;
-    /* The FIRST tick is due immediately (0 = always overdue), so a
-     * short gate run still leaves a profile behind: with the first
-     * write deferred by a full interval, a run whose daemon lives
-     * less than one interval would produce no .profraw at all, and
-     * the harness would report "no coverage" for a run that did
-     * execute code. Writing more often than the interval is safe --
-     * each write is a DELTA, and the file accumulates them. */
-    g_prof_next_ms = 0;
-    fsq_log("INFO", "coverage profile flushing enabled (every %ld ms)", ms);
-}
-
-/* Writes the profile and resets the counters, so the file ends up
- * holding the run's true totals rather than a sum of totals. */
-static void
-coverage_flush_now(void)
-{
-    if (g_prof_write == NULL) return;
-    if (g_prof_lock_ready) EnterCriticalSection(&g_prof_lock);
-    g_prof_write();
-    g_prof_reset();
-    if (g_prof_lock_ready) LeaveCriticalSection(&g_prof_lock);
-}
-
-/* Called from the request path. The due-check is INSIDE the lock, so
- * two connections finishing at once cannot both decide they are due
- * (the second one would then write an empty delta and reset the
- * counters the first one had just written). */
-static void
-coverage_flush_tick(void)
-{
-    DWORD now;
-    if (g_prof_write == NULL) return;
-    EnterCriticalSection(&g_prof_lock);
-    now = GetTickCount();
-    if ((LONG) (now - g_prof_next_ms) >= 0) {
-        g_prof_next_ms = now + g_prof_interval_ms;
-        g_prof_write();
-        g_prof_reset();
-    }
-    LeaveCriticalSection(&g_prof_lock);
-}
-#else
-/* POSIX: the daemon is stopped with SIGTERM and exits normally, so
- * gcov's own atexit hook writes the profile. Nothing to do here --
- * but the TICK is still called from the request path (unconditionally,
- * on both platforms), so the stub has to exist. The init/now pair are
- * Windows-only and are not defined at all here; see the forward
- * declarations near the top of this file. */
-static void coverage_flush_tick(void) {}
-#endif
-
-/* ------------------------------------------------------------------ */
 /* Main                                                                */
 /* ------------------------------------------------------------------ */
 
@@ -2060,8 +1635,8 @@ static void log_exit(void) {
 }
 
 /* Signal-number to name lookup by table (not by index): the C signal
- * macros' values differ per platform (e.g. on Windows SIGABRT==3,
- * SIGSEGV==11; on Linux SIGUSR1==10 and SIGSEGV==11), so indexing an
+ * macros' values differ per platform (e.g. SIGUSR1 is 10 on Linux and 30
+ * on macOS), so indexing an
  * array by `sig` misnames or falls off the end exactly when it matters
  * -- in a crash we have one chance to print the right name. */
 static const char *fsq_sig_name(int sig) {
@@ -2090,210 +1665,6 @@ static const char *fsq_sig_name(int sig) {
     return "fatal signal";
 }
 
-#ifdef _WIN32
-static PSECURITY_DESCRIPTOR g_pipe_sd = NULL;
-
-/* The key file's DACL must not grant anything to Everyone, Authenticated
- * Users or BUILTIN\Users: the Windows counterpart of the POSIX mode check. */
-static int key_file_private(const char *path) {
-    static const char *broad[] = { "S-1-1-0", "S-1-5-11", "S-1-5-32-545" };
-    PACL dacl = NULL;
-    PSECURITY_DESCRIPTOR sd = NULL;
-    ACL_SIZE_INFORMATION info;
-    int ok = 1;
-    if (GetNamedSecurityInfoA((LPSTR) path, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
-                              NULL, NULL, &dacl, NULL, &sd) != ERROR_SUCCESS) return 0;
-    if (!dacl || !GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation)) {
-        LocalFree(sd);
-        return 0;
-    }
-    for (DWORD i = 0; i < info.AceCount && ok; i++) {
-        LPVOID ace = NULL;
-        PSID sid;
-        if (!GetAce(dacl, i, &ace)) { ok = 0; break; }
-        if (((ACE_HEADER *) ace)->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
-        sid = (PSID) &((ACCESS_ALLOWED_ACE *) ace)->SidStart;
-        for (size_t j = 0; j < sizeof(broad) / sizeof(broad[0]); j++) {
-            PSID bsid = NULL;
-            if (ConvertStringSidToSidA(broad[j], &bsid)) {
-                if (EqualSid(sid, bsid)) ok = 0;
-                LocalFree(bsid);
-            }
-        }
-    }
-    LocalFree(sd);
-    return ok;
-}
-
-static void on_fatal(int sig) {
-    fprintf(stderr, "fractalsqld[%ld] FATAL %s (%d), exiting\n", fsq_pid(), fsq_sig_name(sig), sig);
-    fflush(stderr);
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
-
-static HANDLE g_stop_event = NULL;
-
-static BOOL WINAPI on_console_event(DWORD ev) {
-    (void) ev;
-    fsq_log("INFO", "stop requested by console control event");
-    /* A graceful stop is the one path where the process is going to
-     * exit normally, so this is the last chance to write the coverage
-     * profile out. */
-    coverage_flush_now();
-    SetEvent(g_stop_event);
-    return TRUE;
-}
-
-/* The pipe DACL grants read and write to the allow-listed SIDs and nobody
- * else. Named pipe instances are created with REJECT_REMOTE_CLIENTS.
- *
- * The daemon's own account is granted too: it must keep matching this pipe
- * name with new instances after the first one is handed off to a client
- * thread (run_listener's retry loop), and creating instance #2 and later
- * goes through the DACL on the existing pipe object, which the first
- * CreateNamedPipe established. Whatever account the daemon runs as (NT
- * AUTHORITY\LocalService for the service, typically not in the
- * allow-list, which names the *server's* service SID) would otherwise
- * open the existing pipe for that creation, fail with access denied, and
- * log "cannot create pipe instance (error 5), retrying" on every
- * connection. */
-static int build_pipe_sd(const struct fsq_config *cfg) {
-    static char sddl[FSQ_SDDL_MAX];
-    char own_sid[FSQ_SID_MAX];
-    size_t n = (size_t) snprintf(sddl, sizeof(sddl), "D:P");
-    for (size_t i = 0; i < cfg->n_allowed; i++) {
-        int w = snprintf(sddl + n, sizeof(sddl) - n, "(A;;GRGW;;;%s)", cfg->allowed_sids[i]);
-        if (w < 0 || (size_t) w >= sizeof(sddl) - n) return -1;
-        n += (size_t) w;
-    }
-    if (process_user_sid(own_sid, sizeof(own_sid)) == 0) {
-        int w = snprintf(sddl + n, sizeof(sddl) - n, "(A;;GRGW;;;%s)", own_sid);
-        if (w < 0 || (size_t) w >= sizeof(sddl) - n) return -1;
-        n += (size_t) w;
-    } else {
-        /* Local-service accounts resolve fine; this only fires if the
-         * token is unusual enough to defeat OpenProcessToken itself, in
-         * which case the retry loop below would spin on error 5 forever
-         * -- a loud log line beats a silent one. */
-        fsq_log("WARN", "could not resolve the daemon's own SID; the pipe DACL lacks it and second pipe instances may fail to create");
-    }
-    return ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, &g_pipe_sd, NULL) ? 0 : -1;
-}
-
-static HANDLE create_pipe_instance(const char *name, DWORD extra_flags) {
-    SECURITY_ATTRIBUTES sa;
-    sa.nLength = sizeof(sa);
-    sa.lpSecurityDescriptor = g_pipe_sd;
-    sa.bInheritHandle = FALSE;
-    return CreateNamedPipeA(name, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | extra_flags,
-                            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-                            PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, &sa);
-}
-
-static int pipe_wait_client(HANDLE h) {
-    OVERLAPPED ov;
-    DWORD got = 0;
-    int ok = 0;
-    memset(&ov, 0, sizeof(ov));
-    ov.hEvent = CreateEventA(NULL, TRUE, FALSE, NULL);
-    if (!ov.hEvent) return 0;
-    if (ConnectNamedPipe(h, &ov)) {
-        ok = 1;
-    } else if (GetLastError() == ERROR_PIPE_CONNECTED) {
-        ok = 1;
-    } else if (GetLastError() == ERROR_IO_PENDING) {
-        HANDLE waits[2];
-        waits[0] = ov.hEvent;
-        waits[1] = g_stop_event;
-        if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) == WAIT_OBJECT_0) {
-            ok = GetOverlappedResult(h, &ov, &got, FALSE) ? 1 : 0;
-        } else {
-            CancelIoEx(h, &ov);
-            WaitForSingleObject(ov.hEvent, INFINITE);
-        }
-    }
-    CloseHandle(ov.hEvent);
-    return ok;
-}
-
-/* Accept loop. The next pipe instance is created before the current one is
- * handed to its thread, so a client never finds the name with no listener.
- * socket_path cannot change while the daemon runs (RELOAD refuses that),
- * so the instance name comes from one long-held borrow; the connection
- * limit is re-read per accept so a reload applies it to new connections. */
-static int run_listener(void) {
-    struct fsq_config_snap *lsnap = cfg_acquire();
-    const struct fsq_config *cfg = &lsnap->cfg;
-    HANDLE cur = create_pipe_instance(cfg->socket_path, FILE_FLAG_FIRST_PIPE_INSTANCE);
-    if (cur == INVALID_HANDLE_VALUE) {
-        fsq_log("ERROR", "cannot create pipe %s (error %lu): another fractalsqld may be running",
-                cfg->socket_path, (unsigned long) GetLastError());
-        cfg_release(lsnap);
-        return -1;
-    }
-    fsq_log("INFO", "fractalsqld %s listening on %s (max_connections=%d, idle_timeout_secs=%d, allowed_sids=%zu)",
-            FSQL_DAEMON_VERSION, cfg->socket_path, cfg->max_connections, cfg->idle_timeout_secs, cfg->n_allowed);
-    for (;;) {
-        HANDLE next;
-        struct conn_arg *ca;
-        if (WaitForSingleObject(g_stop_event, 0) == WAIT_OBJECT_0) break;
-        uintptr_t th;
-        int over;
-        if (cur == INVALID_HANDLE_VALUE) {
-            cur = create_pipe_instance(cfg->socket_path, 0);
-            if (cur == INVALID_HANDLE_VALUE) {
-                fsq_log("ERROR", "cannot create pipe instance (error %lu), retrying", (unsigned long) GetLastError());
-                FSQ_SLEEP_MS(100);
-                continue;
-            }
-        }
-        if (!pipe_wait_client(cur)) {
-            CloseHandle(cur);
-            cur = INVALID_HANDLE_VALUE;
-            continue;
-        }
-        next = create_pipe_instance(cfg->socket_path, 0);
-        {
-            /* The limit is re-read per accept, so a reload applies to the
-             * next connection rather than whenever this loop restarted.
-             * The check and the increment happen in ONE critical section:
-             * reading g_conns outside the lock and incrementing inside it
-             * let two concurrent accepts both see "room for one more" and
-             * push the daemon past max_connections. */
-            struct fsq_config_snap *ssnap = cfg_acquire();
-            int max_conns = ssnap->cfg.max_connections;
-            cfg_release(ssnap);
-            FSQ_LOCK(g_conn_mu);
-            over = (g_conns >= max_conns);
-            if (!over) g_conns++;
-            FSQ_UNLOCK(g_conn_mu);
-        }
-        if (over) {
-            fsq_log("WARN", "connection refused: max_connections reached");
-            CloseHandle(cur);
-        } else {
-            ca = malloc(sizeof(*ca));
-            if (!ca) { conn_released(); CloseHandle(cur); }
-            else {
-                ca->fd = cur;
-                th = _beginthreadex(NULL, 0, serve_connection, ca, 0, NULL);
-                if (!th) {
-                    fsq_log("ERROR", "cannot start a thread for a connection (errno %d)", errno);
-                    free(ca); conn_released(); CloseHandle(cur);
-                } else {
-                    CloseHandle((HANDLE) th);
-                }
-            }
-        }
-        cur = next;
-    }
-    if (cur != INVALID_HANDLE_VALUE) CloseHandle(cur);
-    fsq_log("INFO", "shutting down: no longer accepting connections");
-    cfg_release(lsnap);
-    return 0;
-}
-#else
 static void on_fatal(int sig) {
     char line[96];
     int n = snprintf(line, sizeof(line), "fractalsqld[%ld] FATAL %s (%d), exiting\n", fsq_pid(), fsq_sig_name(sig), sig);
@@ -2388,63 +1759,7 @@ static void run_listener(void) {
         cfg_release(ssnap);
     }
 }
-#endif
 
-#ifdef _WIN32
-#define FSQ_SERVICE_NAME "fractalsqld"
-#define FSQ_LOG_DEFAULT "C:\\ProgramData\\FractalSQL\\fractalsqld.log"
-
-static SERVICE_STATUS_HANDLE g_svc_handle = NULL;
-static SERVICE_STATUS g_svc_status;
-static DWORD g_svc_checkpoint = 0;
-
-static int serve_setup(const struct fsq_config *cfg) {
-    if (!key_file_private(cfg->key_path)) {
-        fsq_log("ERROR", "hmac_key_file %s grants access to Everyone, Authenticated Users or Users: restrict it to the service account", cfg->key_path);
-        return -1;
-    }
-    if (build_pipe_sd(cfg) != 0) {
-        fsq_log("ERROR", "cannot build the pipe security descriptor from allowed_pipe_sid");
-        return -1;
-    }
-    return 0;
-}
-
-static void report_service(DWORD state, DWORD exit_code) {
-    int pending = state == SERVICE_START_PENDING || state == SERVICE_STOP_PENDING;
-    g_svc_status.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-    g_svc_status.dwCurrentState = state;
-    g_svc_status.dwWin32ExitCode = exit_code ? ERROR_SERVICE_SPECIFIC_ERROR : NO_ERROR;
-    g_svc_status.dwServiceSpecificExitCode = exit_code;
-    g_svc_status.dwControlsAccepted = state == SERVICE_RUNNING ? (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN) : 0;
-    g_svc_status.dwCheckPoint = pending ? ++g_svc_checkpoint : 0;
-    g_svc_status.dwWaitHint = pending ? 5000 : 0;
-    SetServiceStatus(g_svc_handle, &g_svc_status);
-}
-
-static void WINAPI service_ctrl(DWORD code) {
-    if (code == SERVICE_CONTROL_STOP || code == SERVICE_CONTROL_SHUTDOWN) {
-        report_service(SERVICE_STOP_PENDING, 0);
-        SetEvent(g_stop_event);
-    }
-}
-
-static void WINAPI service_main(DWORD argc, LPSTR *argv) {
-    struct fsq_config_snap *snap;
-    (void) argc;
-    (void) argv;
-    g_svc_handle = RegisterServiceCtrlHandlerA(FSQ_SERVICE_NAME, service_ctrl);
-    if (!g_svc_handle) return;
-    report_service(SERVICE_START_PENDING, 0);
-    snap = cfg_acquire();
-    if (!snap) { report_service(SERVICE_STOPPED, 1); return; }
-    if (serve_setup(&snap->cfg) != 0) { cfg_release(snap); report_service(SERVICE_STOPPED, 1); return; }
-    report_service(SERVICE_RUNNING, 0);
-    if (run_listener() != 0) { cfg_release(snap); report_service(SERVICE_STOPPED, 1); return; }
-    cfg_release(snap);
-    report_service(SERVICE_STOPPED, 0);
-}
-#endif
 
 int main(int argc, char **argv) {
     const char *config_path = getenv(FSQ_CONFIG_ENV);
@@ -2453,12 +1768,7 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) config_path = argv[++i];
-#ifdef _WIN32
-        else if (strcmp(argv[i], "--service") == 0) service_mode = 1;
-        else { fprintf(stderr, "usage: fractalsqld [-c config] [--service]\n"); return 2; }
-#else
         else { fprintf(stderr, "usage: fractalsqld [-c config]\n"); return 2; }
-#endif
     }
     if (!config_path) config_path = FSQ_CONFIG_DEFAULT;
     if (load_config(config_path, &cfg) != 0) {
@@ -2472,68 +1782,6 @@ int main(int argc, char **argv) {
      * CANCEL has arrived. */
     fractalsql_interrupt_hook_set(fsq_check_cancelled);
 
-#ifdef _WIN32
-    g_stop_event = CreateEventA(NULL, TRUE, FALSE, NULL);
-    if (!g_stop_event) {
-        fprintf(stderr, "fractalsqld: cannot create the stop event\n");
-        return 1;
-    }
-    {
-        const char *log_path = cfg.log_path[0] ? cfg.log_path : (service_mode ? FSQ_LOG_DEFAULT : NULL);
-        if (log_path) {
-            g_logf = fopen(log_path, "a");
-            if (!g_logf) {
-                fprintf(stderr, "fractalsqld: cannot open log %s\n", log_path);
-                return 1;
-            }
-        }
-    }
-    atexit(log_exit);
-    /* Coverage builds flush their own profile (see the block above):
-     * the harness stops this daemon with a hard kill, which would
-     * otherwise leave no profile behind at all. */
-    coverage_flush_init();
-    /* Startup: gate on the config (platform checks + provider checks),
-     * then push the provider settings the consumers boot from. Refusing
-     * to start on a bad value beats lazily surfacing it on the first LLM
-     * call, and mirrors what a RELOAD will enforce later. */
-    if (validate_cfg(&cfg) != 0) return 1;
-    if (daemon_check_provider(&cfg) != 0) return 1;
-    if (daemon_apply_provider(&cfg) != 0) {
-        fprintf(stderr, "fractalsqld: out of memory applying provider settings\n");
-        return 1;
-    }
-    if (service_mode) {
-        SERVICE_TABLE_ENTRYA table[2];
-        if (cfg_publish(&cfg) != 0) {
-            fprintf(stderr, "fractalsqld: out of memory publishing the configuration\n");
-            return 1;
-        }
-        table[0].lpServiceName = (LPSTR) FSQ_SERVICE_NAME;
-        table[0].lpServiceProc = service_main;
-        table[1].lpServiceName = NULL;
-        table[1].lpServiceProc = NULL;
-        if (!StartServiceCtrlDispatcherA(table)) {
-            fsq_log("ERROR", "cannot start the service dispatcher (error %lu); run without --service to test from a console",
-                    (unsigned long) GetLastError());
-            return 1;
-        }
-        return 0;
-    }
-    SetConsoleCtrlHandler(on_console_event, TRUE);
-    signal(SIGSEGV, on_fatal);
-    signal(SIGABRT, on_fatal);
-    signal(SIGFPE, on_fatal);
-    signal(SIGILL, on_fatal);
-    /* serve_setup borrows the stack config directly: it runs before anything
-     * published, and cfg_acquire() would deref a NULL g_snap here. */
-    if (serve_setup(&cfg) != 0) return 1;
-    if (cfg_publish(&cfg) != 0) {
-        fprintf(stderr, "fractalsqld: out of memory publishing the configuration\n");
-        return 1;
-    }
-    return run_listener() == 0 ? 0 : 1;
-#else
     (void) service_mode;
     {
         struct sigaction sa;
@@ -2556,8 +1804,8 @@ int main(int argc, char **argv) {
     atexit(log_exit);
 
     umask(0007);   /* the socket is never created wider than owner and group */
-    /* Same startup gate as the Windows branch above; the apply must have
-     * finished before anything can talk to the consumers. */
+    /* The apply must have finished before anything can talk to the
+     * consumers. */
     if (daemon_apply_provider(&cfg) != 0) {
         fprintf(stderr, "fractalsqld: out of memory applying provider settings\n");
         return 1;
@@ -2573,5 +1821,4 @@ int main(int argc, char **argv) {
     }
     run_listener();
     return 0;
-#endif
 }

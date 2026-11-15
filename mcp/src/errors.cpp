@@ -7,9 +7,9 @@ namespace fsqlmcp
     namespace
     {
         // Single linear passes rather than std::regex, which matches
-        // recursively (one stack frame per input character): on MSVC a long
+        // recursively (one stack frame per input character): a long
         // message (an engine error echoing a long identifier or SQL, say)
-        // throws regex_error(error_complexity), and on libstdc++ the same input
+        // can throw regex_error(error_complexity), and on libstdc++ the same input
         // can exhaust the stack. No input length can fail here.
         bool isSpace( char c ) { return std::isspace( static_cast<unsigned char>( c ) ) != 0; }
         bool isWord( char c )  { return std::isalnum( static_cast<unsigned char>( c ) ) != 0 || c == '_'; }

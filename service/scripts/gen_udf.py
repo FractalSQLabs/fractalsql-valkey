@@ -14,8 +14,7 @@
 #   fsqlctl_functions.h  the CLI's callable-name table (Apache-2.0; one plain
 #                  string per function, so no kind/cls columns and no source-
 #                  form pairing beyond the same cross-check). Also emitted here
-#                  so the Windows build (build.bat) can produce fsqlctl.exe
-#                  without a POSIX shell.
+#                  so the CLI builds without a POSIX shell.
 #
 # Calling forms (verified against src/ at generation time):
 #   STR   char *f(UDF_INIT*, UDF_ARGS*, char *result, unsigned long *length,

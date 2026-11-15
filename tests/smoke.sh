@@ -7,7 +7,7 @@
 # workflow brings this up; for local runs see the README).
 #
 # What it checks:
-#   1. fractal.edition / .version metadata commands return Community / 2.0.0
+#   1. fractal.edition / .version metadata commands return Community / 2.0.1
 #   2. A corpus stored as packed float32 BLOB is searchable
 #   3. FRACTAL.SEARCH returns a JSON document containing dim, n_corpus,
 #      best_point, best_fit, top_k — the canonical fsql_search_ptr shape
@@ -38,7 +38,7 @@ log "FRACTAL.EDITION + .VERSION"
 edition="$("$VALKEY_CLI" FRACTAL.EDITION)"
 version="$("$VALKEY_CLI" FRACTAL.VERSION)"
 [[ "$edition" = "Community" ]] || fail "expected edition=Community, got '$edition'"
-[[ "$version" = "2.0.0" ]]     || fail "expected version=2.0.0, got '$version'"
+[[ "$version" = "2.0.1" ]]     || fail "expected version=2.0.1, got '$version'"
 
 # --- Build a deterministic corpus + query as packed float32 BLOBs -------
 # 8 rows × 4 dims = 32 floats = 128 bytes. The query is identical to

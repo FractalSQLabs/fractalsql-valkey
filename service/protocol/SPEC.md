@@ -21,8 +21,6 @@ and the TLV argument and result encoding are unchanged from version 1.
 - POSIX: a Unix domain socket of type `SOCK_STREAM`. The path comes from the
   daemon's `socket_path`. Access is limited by peer credentials
   (`SO_PEERCRED`, against `allowed_uids`).
-- Windows: a named pipe `\\.\pipe\<name>`. Access is limited by the pipe DACL
-  and by the client's user SID (`allowed_pipe_sid`).
 - TCP is not part of this protocol.
 
 ## 2. Frame
@@ -259,8 +257,8 @@ that disconnects without deinitializing does not leak them.
 - Every frame is authenticated with HMAC-SHA256 before parsing.
 - Peer identity is checked on connect, and the connection is refused if the
   peer is not on the allow-list.
-- The key file must not be readable by other users. POSIX checks the mode
-  bits, and Windows checks the DACL.
+- The key file must not be readable by other users. The daemon checks the mode
+  bits.
 - Logs carry opcodes, function names, sizes, peer identities, and error text.
   They never carry argument or result bytes, or the key.
 

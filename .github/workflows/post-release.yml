@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag to process (e.g. v2.0.0)'
+        description: 'Release tag to process (e.g. v2.0.1)'
         required: true
 
 # Read-only by default; the one job below asks for what it needs.
@@ -60,7 +60,6 @@ jobs:
               --dir dist \
               --pattern '*.deb' \
               --pattern '*.rpm' \
-              --pattern '*.msi' \
               --pattern '*.zip' \
               || echo "note: no matching assets on release yet — continuing"
           ls -la dist || true
@@ -69,7 +68,7 @@ jobs:
         id: have_assets
         run: |
           count=$(find dist -maxdepth 1 -type f \
-                \( -name '*.deb' -o -name '*.rpm' -o -name '*.msi' -o -name '*.zip' \) \
+                \( -name '*.deb' -o -name '*.rpm' -o -name '*.zip' \) \
                 2>/dev/null | wc -l)
           echo "count=${count}" >> "$GITHUB_OUTPUT"
           echo "Found ${count} release artifact(s) to attest + sign."
@@ -81,7 +80,6 @@ jobs:
           subject-path: |
             dist/*.deb
             dist/*.rpm
-            dist/*.msi
             dist/*.zip
 
       - name: Install cosign
@@ -94,7 +92,7 @@ jobs:
           COSIGN_EXPERIMENTAL: "1"
         run: |
           set -euo pipefail
-          for f in dist/*.deb dist/*.rpm dist/*.msi dist/*.zip; do
+          for f in dist/*.deb dist/*.rpm dist/*.zip; do
               [ -f "$f" ] || continue
               echo "--- signing $f ---"
               cosign sign-blob \

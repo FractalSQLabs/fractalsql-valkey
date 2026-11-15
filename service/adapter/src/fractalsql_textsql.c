@@ -103,15 +103,9 @@
 #include "fractalsql_provider.h"     /* fractalsql_textsql_{check,apply}_provider */
 #include "fractalsql_config.h"       /* the per-session configuration overlay */
 #include "fv_plugin_verify.h"        /* the reasoning plugin's authenticity gate */
-#include "fractalsql_msvc_compat.h"  /* setenv/unsetenv on MSVC */
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-#  include <Windows.h>
-#  define FRACTAL_EXPORT __declspec(dllexport)
-#else
 #  include <pthread.h>
 #  define FRACTAL_EXPORT
-#endif
 
 /* Same stderr-mirroring SFS_INIT_ERROR as fractalsql_cognition.c
  * (duplicated per translation unit by this repo's established
@@ -228,28 +222,9 @@ str_out_set(str_out_ctx *so, const char *text, size_t len, unsigned long *out_le
 /* identical comment; duplicated per translation unit by this repo's   */
 /* established precedent rather than shared.                           */
 /* ------------------------------------------------------------------ */
-#if defined(_WIN32)
-static CRITICAL_SECTION g_load_lock;
-static INIT_ONCE        g_lock_once = INIT_ONCE_STATIC_INIT;
-
-static BOOL CALLBACK
-init_load_lock_once(PINIT_ONCE ip, PVOID param, PVOID *ctx)
-{
-    (void) ip; (void) param; (void) ctx;
-    InitializeCriticalSection(&g_load_lock);
-    return TRUE;
-}
-static void load_lock(void)
-{
-    InitOnceExecuteOnce(&g_lock_once, init_load_lock_once, NULL, NULL);
-    EnterCriticalSection(&g_load_lock);
-}
-static void load_unlock(void) { LeaveCriticalSection(&g_load_lock); }
-#else
 static pthread_mutex_t g_load_lock = PTHREAD_MUTEX_INITIALIZER;
 static void load_lock(void)   { pthread_mutex_lock(&g_load_lock); }
 static void load_unlock(void) { pthread_mutex_unlock(&g_load_lock); }
-#endif
 
 /* ------------------------------------------------------------------ */
 /* Provider config. Per key, in priority order (fractalsql_provider.h */

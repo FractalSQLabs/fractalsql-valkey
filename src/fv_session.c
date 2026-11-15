@@ -4,7 +4,7 @@
  *
  * Sessions: the state the diversify/repulsion layer keeps between searches.
  *
- * The SQL editions hold it per connection. Valkey has no per-connection
+ * Valkey has no per-connection
  * state that survives a reconnect or a proxy, so a session is NAMED by the
  * caller: FRACTAL.DIVERSIFY.ENABLE <session> creates it, and
  * FRACTAL.SEARCH / FRACTAL.EXPLORE ... SESSION <session> search through it.

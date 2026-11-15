@@ -16,11 +16,7 @@
 
 #include "../../common/fsq_sha256.h"
 
-#if defined(_WIN32)
-#  include <windows.h>
-#else
 #  include <pthread.h>
-#endif
 
 /* The FractalSQLabs reasoning-plugin signing public key. A plugin release is
  * signed with the matching private key; its detached <plugin>.sig (64 raw
@@ -36,27 +32,9 @@ static const unsigned char FV_PLUGIN_PUBKEY[32] = {
 /* The plugin that was verified last, and its digest at the time. The
  * after-load check compares the file against this, so a file swapped
  * between the check and the load is caught. */
-#if defined(_WIN32)
-static INIT_ONCE        g_lock_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_lock;
-static BOOL CALLBACK
-init_lock_once(PINIT_ONCE ip, PVOID param, PVOID *ctx)
-{
-    (void) ip; (void) param; (void) ctx;
-    InitializeCriticalSection(&g_lock);
-    return TRUE;
-}
-static void fv_lock(void)
-{
-    InitOnceExecuteOnce(&g_lock_once, init_lock_once, NULL, NULL);
-    EnterCriticalSection(&g_lock);
-}
-static void fv_unlock(void) { LeaveCriticalSection(&g_lock); }
-#else
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static void fv_lock(void)   { pthread_mutex_lock(&g_lock); }
 static void fv_unlock(void) { pthread_mutex_unlock(&g_lock); }
-#endif
 
 static char         g_verified_path[4096];
 static unsigned char g_verified_digest[32];

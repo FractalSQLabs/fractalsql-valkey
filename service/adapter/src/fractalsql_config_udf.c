@@ -56,11 +56,7 @@
 
 #include "fractalsql_config.h"
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-#  define FRACTAL_EXPORT __declspec(dllexport)
-#else
 #  define FRACTAL_EXPORT
-#endif
 
 /* Same stderr-mirroring SFS_INIT_ERROR as the other translation units
  * in this repo (duplicated per TU by this repo's established

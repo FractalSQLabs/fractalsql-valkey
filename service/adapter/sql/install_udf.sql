@@ -1,9 +1,7 @@
 -- fractalsql UDF registration.
 --
--- Prerequisite: fractalsql.so (Linux) or fractalsql.dll (Windows) is
--- in the host database's plugin_dir. The release packages handle this for you:
---   Linux:   <the server's plugin directory>/fractalsql.so
---   Windows: C:\Program Files\the host database <VER>\lib\plugin\fractalsql.dll
+-- Prerequisite: fractalsql.so is in the host database's plugin_dir. The
+-- release packages handle this for you.
 --
 -- Run once, as a user with CREATE FUNCTION privilege:
 --   <sql client> -u root -p < sql/install_udf.sql
@@ -744,7 +742,7 @@ DELIMITER $$
 -- a stored routine's charset (params, DECLAREd variables, string
 -- literals) is frozen to character_set_client/character_set_connection
 -- AT CREATE TIME. A client installing this file with a legacy codepage
--- charset (e.g. cp850, which the Windows SQL client auto-detects
+-- charset (e.g. cp850, which a SQL client may auto-detect
 -- from the console codepage) then bakes cp850 into every routine, and
 -- any CONCAT mixing those variables with information_schema data
 -- (utf8) fails at CALL time with "Illegal mix of collations for

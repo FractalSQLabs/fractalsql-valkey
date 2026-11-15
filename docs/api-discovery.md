@@ -23,16 +23,16 @@ FRACTAL.SEARCH <corpus_key> <query_blob> [K] [SESSION <session>]
 ```
 
 - **`corpus_key`**: a string holding `N` rows of `dim` packed little-endian float32 values, back to back.
-  `N = byte_length / (dim * 4)`. This is the Valkey form of the SQL products' table-and-column pair.
+  `N = byte_length / (dim * 4)`.
 - **`query_blob`**: packed float32. Its length defines `dim`.
 - **`K`**: optional, default 10.
 - **`SESSION <session>`**: optional; searches through a named [session](#diversify--repulsion-sessions) so the diversification state carries from call to call.
 - Limits: the query is at most 4 MiB, the corpus at most 256 MiB, and the corpus length must be a multiple of `dim * 4`.
   **NaN and Inf are refused** in both.
 
-### `params`
+### Search settings
 
-The SQL products take a `params` JSON of SFS settings. `FRACTAL.SEARCH` does not: it runs fixed settings (30 generations, a population
+`FRACTAL.SEARCH` runs fixed settings (30 generations, a population
 of 50, diffusion factor 2, walk 0.5, bound clipping on). `FRACTAL.EXPLORE` uses 15 generations, no walk, and the population size you pass.
 
 ### Ranking
@@ -74,30 +74,29 @@ keep a companion hash whose field is the row index (the agents' `IDS` and `CONTE
 | `K n out of range [1, 10000]` / `population_size n out of range [2, 10000]` | the value is outside the allowed range |
 | `too much work in flight` | the in-flight cap was reached; retry shortly |
 
-## Convergence trace (`fractal_search_debug`)
+## Determinism
 
-**Not provided on Valkey as a command.** The SQL products expose the search's per-generation trace as its own function. Here the
-corpus-free convergence runs inside `FRACTAL.AGENT.SCHEDULE_WORKLOAD` (it refines the task vector that way) but only the match is
-returned, not the trace. `FRACTAL.SEARCH` takes no seed argument; the commands that accept a `SEED` (`FRACTAL.OPTIMIZE.PORTFOLIO` and
-`REBALANCE_SIBLING`) are deterministic with one.
+`FRACTAL.SEARCH` takes no seed argument; the commands that accept a `SEED` (`FRACTAL.OPTIMIZE.PORTFOLIO` and
+`REBALANCE_SIBLING`) are deterministic with one. The corpus-free convergence inside `FRACTAL.AGENT.SCHEDULE_WORKLOAD` refines the
+task vector and returns only the match.
 
 ## Table-backed search: a corpus key and its companion hashes
 
-The SQL editions search a table through `fractal_search_telemetry` and related functions, joining the hit back to an id column. On Valkey the
-"table" is the corpus key, and the columns you would join are **companion hashes** keyed by row index. Three commands do the join for you:
+A corpus key holds only vectors; the id, content and filter attribute of each row live in **companion hashes** keyed by row index.
+Three commands do the join for you:
 
-- **`FRACTAL.AGENT.RECALL_HYBRID corpus query [K n] [IDS h] [CONTENT h] [FILTER h value]`** is the
-  `fractal_hybrid_clinical_search` + id-join recipe: the nearest rows **inside a cohort** (`FILTER hash value` keeps rows whose
+- **`FRACTAL.AGENT.RECALL_HYBRID corpus query [K n] [IDS h] [CONTENT h] [FILTER h value]`** returns the
+  nearest rows **inside a cohort** (`FILTER hash value` keeps rows whose
   entry equals `value`), returned with their id and content. See [api-agency.md](api-agency.md).
 - **`FRACTAL.AGENT.PATIENT_DETERIORATION_TRIAGE`** searches a cohort and the drift of an entity from its baseline in one call.
 - **`FRACTAL.AGENT.RECOMMEND_DIVERSE`** is the repulsion-diverse top-k.
 
 A two-predicate cohort (for example year **and** component) is one hash whose value is the combined predicate (`2023|battery`).
 
-## Search on a change (`fractal_search_trajectory`)
+## Search on a change
 
-"What changed" is often a better query than "where am I". The SQL editions search for the vector `current - baseline`. On Valkey
-do the subtraction in your client (or let an agent do it) and search for the result:
+"What changed" is often a better query than "where am I". Search for the vector `current - baseline`: do the
+subtraction in your client (or let an agent do it) and search for the result:
 
 ```
 FRACTAL.SEARCH signatures <delta_blob> 1        # delta = current - baseline, packed float32
@@ -150,7 +149,7 @@ Search can be made to *avoid* what it has already shown. The repulsion layer rec
 pushes later searches away from their neighbourhoods; its diversity quotient (D_q) reads how widely the last searches spread. It is
 **off by default**, and a search that does not name a session behaves exactly as it always did.
 
-The SQL editions keep this state per connection. Valkey has no state that survives a reconnect or a proxy, so a session here is
+Valkey has no state that survives a reconnect or a proxy, so a session is
 **named by you**: `FRACTAL.DIVERSIFY.ENABLE <session>` creates it, and `SESSION <session>` on `FRACTAL.SEARCH` or `FRACTAL.EXPLORE`
 searches through it. Any client that knows the name shares the state.
 

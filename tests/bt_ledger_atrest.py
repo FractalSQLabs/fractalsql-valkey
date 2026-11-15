@@ -263,16 +263,12 @@ def phase_atrest(r, a):
             all(re.match(r"^[0-9a-f]{64}$", str(x.get("hash", ""))) for x in lines), str(lines))
 
     # --- the permissions ---
-    if os.name == "nt":
-        r.known("the ledger files are owner-only",
-                "the Windows permission model has no group/other mode bits to check")
-    else:
-        for path, what in ((ledger, "the ledger file"),
-                           (csv_path, "the CSV mirror"),
-                           (head_path, "the head file")):
-            mode = stat.S_IMODE(os.stat(path).st_mode)
-            r.check("%s is not group- or world-readable" % what, (mode & 0o077) == 0,
-                    "%s mode=%o" % (path, mode))
+    for path, what in ((ledger, "the ledger file"),
+                       (csv_path, "the CSV mirror"),
+                       (head_path, "the head file")):
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+        r.check("%s is not group- or world-readable" % what, (mode & 0o077) == 0,
+                "%s mode=%o" % (path, mode))
 
     r.check("the server survived", c.call("PING") == "PONG")
     c.close()

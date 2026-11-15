@@ -231,7 +231,7 @@ namespace fsqlmcp
         } guard{ spec, args, errClass, t0, ctx.clientKey, ctx.era };
 
         // The error is rethrown after the handlers, never from inside one: a throw
-        // from a catch block miscompiles under clang on Windows (MSVC unwinder crash).
+        // from a catch block can miscompile under some clang builds.
         std::exception_ptr pending;
         try
         {

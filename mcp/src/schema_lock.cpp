@@ -81,7 +81,7 @@ namespace fsqlmcp
         std::string expected;
         std::getline( in, expected );
         /* The lock file holds one hex digest on one line. A file
-         * committed with CRLF line endings (Windows; git's default for
+         * committed with CRLF line endings (git's default for
          * text files) leaves the CR in the string getline() returns, and
          * the comparison against the computed hash then never matches: a
          * spurious "schema drift" warning on every machine that reads

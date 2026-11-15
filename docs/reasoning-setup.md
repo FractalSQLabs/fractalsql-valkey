@@ -218,7 +218,7 @@ Keep the daemon's socket private: it is created with mode `0660`, only the `allo
 
 Text a model reads can contain instructions. The plugin sends a default system message telling the model to answer using only the data it was given and to
 ignore instructions inside it; set `FSQL_REASONING_HTTP_SYSTEM_PROMPT` to replace it with your own, or to `""` to send none. This is a floor, not a guarantee: treat
-a model's output as untrusted, and never run it as a command without validating it ([text-to-sql-setup.md](text-to-sql-setup.md)).
+a model's output as untrusted, and never run it as a command without validating it.
 
 ### Data leaving your network
 

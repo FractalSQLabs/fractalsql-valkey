@@ -282,14 +282,9 @@ FRACTAL.OPTIMIZE.MULTIMODAL.PARETO mu cov k n_restarts [max_front [seed]]
 Returns `{"n_found":N,"candidates":[{"sharpe","weights"}, ...]}` (the Pareto form adds `"return"` and `"risk"` to each candidate), best first.
 `FRACTAL.AGENT.DIVERSE_PORTFOLIOS` wraps this with a reasoned comparison ([api-agency.md](api-agency.md)).
 
-### Subset optimization
+## Per-document feature vectors
 
-The SQL editions also expose a generic value-weighted subset optimizer (`fractal_optimize_subset`). It is not available as a Valkey command.
-
-## Named Feature Store
-
-The SQL editions keep a per-document vector store (`fractal_store_morphology`, `fractal_mine_topology_negatives`) in a table. On Valkey,
-store a document's feature vector in a string key or a hash of its own, and search it with `FRACTAL.SEARCH`.
+Store a document's feature vector in a string key or a hash of its own, and search it with `FRACTAL.SEARCH`.
 
 ## Vector Math and Quantization
 

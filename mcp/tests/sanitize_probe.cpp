@@ -4,7 +4,7 @@
 // sanitize_probe: differential test for fsqlmcp::sanitizeSecrets (src/errors.cpp).
 //
 // sanitizeSecrets used to be two std::regex_replace passes. std::regex matches
-// recursively (one stack frame per input character): on MSVC a long message
+// recursively (one stack frame per input character): a long message
 // -- an engine error echoing a long identifier or SQL -- threw
 // regex_error(error_complexity), surfacing as a "server" error out of the
 // error path itself, and on libstdc++ the same input can exhaust the stack.

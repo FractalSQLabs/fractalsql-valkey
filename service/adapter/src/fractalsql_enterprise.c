@@ -41,8 +41,7 @@
  *    the client connect and query calls live in, so it's technically
  *    available), or (b) a local file. (a) needs new credential/socket
  *    config invented from scratch (a DSN env var, platform-specific
- *    transport: Unix socket on Linux/Darwin, named pipe or TCP on
- *    Windows) and embeds DB credentials inside a plugin, a real new
+ *    transport: a Unix socket) and embeds DB credentials inside a plugin, a real new
  *    attack surface. (b) needs neither. This file uses (b): a local
  *    file, path from the enterprise_ledger_path config key (default:
  *    fractalsql_ledger.dat, relative to the fractalsqld daemon's
@@ -126,13 +125,6 @@
 #include <string.h>
 #include <time.h>
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-#  include <Windows.h>
-#  include <io.h>                /* _commit: flush the ledger write through to disk */
-#  include <fcntl.h>             /* _sopen_s: owner-only file creation */
-#  include <sys/stat.h>          /* _chmod: owner-only file permissions */
-#  define FRACTAL_EXPORT __declspec(dllexport)
-#else
 #  include <dlfcn.h>
 #  include <fcntl.h>             /* open: owner-only file creation */
 #  include <pthread.h>
@@ -140,7 +132,6 @@
 #  include <syslog.h>            /* syslog: the external anchor log sink */
 #  include <unistd.h>            /* fsync: flush the ledger write through to disk */
 #  define FRACTAL_EXPORT
-#endif
 
 #include "fractalsql.h"          /* FSQL_OK, fsql_ledger_*, fsql_audit_unpack */
 #include "fractalsql_sql.h"      /* fsql_ctx, fsql_ledger_*, fsql_audit_unpack */
@@ -149,7 +140,6 @@
 #include "fractalsql_provider.h" /* fractalsql_enterprise_{check,apply}_provider */
 #include "fractalsql_hmac.h"     /* fsql_sha256/fsql_hmac_sha256: vendored, public-domain SHA-256 + HMAC-SHA256 */
 #include "fsql_audit_redact.h"  /* fsql_audit_redact_json: the audit-trail text redactor */
-#include "fractalsql_msvc_compat.h"  /* strdup -> _strdup rename on MSVC/clang-cl */
 #include "fractalsql_parse.h"    /* parse_vector_csv, shared with fractalsql.c/fractalsql_vector.c */
 
 #if defined(__linux__)
@@ -296,34 +286,12 @@ static ent_portfolio_multimodal_fn g_ent_portfolio_multimodal;
 static ent_portfolio_multimodal_ex_fn g_ent_portfolio_multimodal_ex;
 static ent_portfolio_multimodal_pareto_fn g_ent_portfolio_multimodal_pareto;
 
-#if defined(_WIN32)
-static CRITICAL_SECTION g_ent_lock;
-static INIT_ONCE        g_ent_lock_once = INIT_ONCE_STATIC_INIT;
-
-static BOOL CALLBACK
-init_ent_lock_once(PINIT_ONCE ip, PVOID param, PVOID *ctx)
-{
-    (void) ip; (void) param; (void) ctx;
-    InitializeCriticalSection(&g_ent_lock);
-    return TRUE;
-}
-static void ent_lock(void)
-{
-    InitOnceExecuteOnce(&g_ent_lock_once, init_ent_lock_once, NULL, NULL);
-    EnterCriticalSection(&g_ent_lock);
-}
-static void ent_unlock(void) { LeaveCriticalSection(&g_ent_lock); }
-
-static void *ent_dlopen(const char *path) { return (void *) LoadLibraryA(path); }
-static void *ent_dlsym(void *h, const char *name) { return (void *) GetProcAddress((HMODULE) h, name); }
-#else
 static pthread_mutex_t g_ent_lock = PTHREAD_MUTEX_INITIALIZER;
 static void ent_lock(void)   { pthread_mutex_lock(&g_ent_lock); }
 static void ent_unlock(void) { pthread_mutex_unlock(&g_ent_lock); }
 
 static void *ent_dlopen(const char *path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
 static void *ent_dlsym(void *h, const char *name) { return dlsym(h, name); }
-#endif
 
 /* dlopen the exact bytes whose signature was verified, via a private
  * temp copy. ent_verify_signature reads the library through a FILE* and
@@ -333,42 +301,14 @@ static void *ent_dlsym(void *h, const char *name) { return dlsym(h, name); }
  * necessarily what was checked. Writing the verified bytes to a fresh
  * private file and loading THAT closes the window.
  *
- * POSIX unlinks the copy immediately after the load -- the mapping
- * survives, and nothing is left on disk. Windows cannot delete a loaded
- * library, so the copy persists for the life of the process: it is
- * pid-named (pids recycle, so a later process with the same pid
- * overwrites it) and lives in the OS temp directory, NOT next to the
- * original -- the original may be a source tree or staging directory,
- * and one unique pid per restart would otherwise accumulate a copy
- * there on every daemon restart. ent_clean_stale_copies() below
+ * The copy is unlinked immediately after the load -- the mapping
+ * survives, and nothing is left on disk. If the daemon dies between the
+ * copy and the unlink, the leftover is pid-named (pids recycle, so a
+ * later process with the same pid overwrites it) and lives in the OS
+ * temp directory, NOT next to the original -- the original may be a
+ * source tree or staging directory. ent_clean_stale_copies() below
  * garbage-collects leftovers from dead processes as a side effect of
  * each verified load, so the temp directory stays bounded. */
-#if defined(_WIN32)
-static void
-ent_clean_stale_copies(const char *dir)
-{
-    char               pattern[MAX_PATH];
-    WIN32_FIND_DATAA   fd;
-    HANDLE             h;
-
-    if (snprintf(pattern, sizeof pattern, "%s.fractalsql-ent-*.tmp", dir)
-        >= (int) sizeof pattern)
-        return;
-    h = FindFirstFileA(pattern, &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do
-    {
-        char p[MAX_PATH];
-        if (snprintf(p, sizeof p, "%s%s", dir, fd.cFileName) < (int) sizeof p)
-            /* Best effort: a file still loaded by a live process (ours
-             * before restart, or another daemon process) fails the delete with
-             * a sharing violation, which is exactly right -- anything
-             * deletable is by definition not mapped anywhere. */
-            DeleteFileA(p);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-}
-#endif /* _WIN32 */
 
 static void *
 ent_dlopen_verified_copy(const char *orig_path,
@@ -377,20 +317,6 @@ ent_dlopen_verified_copy(const char *orig_path,
     char  tmp_path[4096];
     FILE *f;
 
-#if defined(_WIN32)
-    {
-        (void) orig_path;  /* temp dir comes from GetTempPathA here */
-        char tmpdir[MAX_PATH];
-        if (GetTempPathA(sizeof tmpdir, tmpdir) == 0) return NULL;
-        ent_clean_stale_copies(tmpdir);
-        if (snprintf(tmp_path, sizeof tmp_path, "%s.fractalsql-ent-%lu.tmp",
-                     tmpdir, (unsigned long) GetCurrentProcessId())
-            >= (int) sizeof tmp_path)
-            return NULL;
-        f = fopen(tmp_path, "wb");   /* pid-recycled overwrite, see above */
-        if (f == NULL) return NULL;
-    }
-#else
 #if defined(__linux__) && defined(SYS_memfd_create)
     /* Preferred on Linux: load the verified bytes from an anonymous memory
      * file. A tmpfs /tmp mounted noexec (common in containers) refuses to
@@ -448,26 +374,17 @@ ent_dlopen_verified_copy(const char *orig_path,
             if (f == NULL) { close(fd); remove(tmp_path); return NULL; }
         }
     }
-#endif
     {
         size_t wn = fwrite(bytes, 1, len, f);
         bool   ok = (wn == len) && (fclose(f) == 0);
         if (!ok) { remove(tmp_path); return NULL; }
     }
 
-#if defined(_WIN32)
-    {
-        void *h = ent_dlopen(tmp_path);
-        if (h == NULL) remove(tmp_path);
-        return h;
-    }
-#else
     {
         void *h = ent_dlopen(tmp_path);
         remove(tmp_path);   /* the loaded mapping survives the unlink */
         return h;
     }
-#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -495,15 +412,6 @@ typedef enum {
     ENT_SIG_IOERROR    /* could not read the .so or .sig file at all */
 } ent_sig_result_t;
 
-/* NOTE: the Windows UCRT stdio implementation has a documented
- * STATUS_STACK_BUFFER_OVERRUN crash inside fread/fread_s's own internal
- * validation when the code runs inside a dynamically-linked-CRT host
- * process (diagnosed when this file ran in-process inside the server;
- * the fractalsqld daemon is a plain, statically-linked-CRT exe, where
- * the mode is not expected). This function
- * uses plain fopen/fread on every platform for simplicity; if Windows
- * testing ever hits that failure mode, raw Win32 CreateFileA/ReadFile in
- * place of CRT stdio is the known fix. */
 /* Verifies the detached signature over so_path's exact bytes. On
  * ENT_SIG_OK, and only then, the verified bytes are handed back through
  * out_verified_bytes (ownership transfers; caller frees) with their
@@ -789,32 +697,20 @@ ensure_enterprise_lib(void)
                    "fractalsql: enterprise library \"%s\" passed signature "
                    "verification but could not be loaded (dlopen failed: %s)\n",
                    path,
-#if defined(_WIN32)
-                   "see GetLastError()");
-#else
                    dlerror());
-#endif
         else
             fprintf(stderr,
                    "fractalsql: enterprise library \"%s\" could not be "
                    "loaded (dlopen failed: %s)\n",
                    path,
-#if defined(_WIN32)
-                   "see GetLastError()");
-#else
                    dlerror());
-#endif
         ent_unlock();
         return false;
     }
 
     if (!ent_resolve_symbols(h))
     {
-#if defined(_WIN32)
-        FreeLibrary((HMODULE) h);
-#else
         dlclose(h);
-#endif
         ent_unlock();
         return false;
     }
@@ -1164,11 +1060,7 @@ ledger_hex_encode(const uint8_t src[LEDGER_HASH_LEN], char out[LEDGER_HASH_LEN *
 /* fopen() takes the umask, so a deployment that ran with a permissive   */
 /* umask left the audit trail readable by every account on the host.     */
 /* ------------------------------------------------------------------ */
-#if defined(_WIN32) || defined(__CYGWIN__)
-#  define LEDGER_FILE_MODE (_S_IREAD | _S_IWRITE)
-#else
 #  define LEDGER_FILE_MODE 0600
-#endif
 
 /* Opens `path` for reading or writing with owner-only permissions.
  *
@@ -1181,18 +1073,6 @@ ledger_hex_encode(const uint8_t src[LEDGER_HASH_LEN], char out[LEDGER_HASH_LEN *
 static FILE *
 ledger_open_private(const char *path, int flags, const char *fmode, int create)
 {
-#if defined(_WIN32) || defined(__CYGWIN__)
-    int fd;
-    int oflags = flags | _O_BINARY | (create ? _O_CREAT : 0);
-    if (_sopen_s(&fd, path, oflags, _SH_DENYNO, LEDGER_FILE_MODE) != 0)
-        return NULL;
-    /* _sopen_s applies the mode only to a file it CREATES, so an
-     * existing file keeps whatever permissions it had: tighten it. */
-    (void) _chmod(path, LEDGER_FILE_MODE);
-    FILE *fp = _fdopen(fd, fmode);
-    if (fp == NULL) { (void) _close(fd); return NULL; }
-    return fp;
-#else
     int fd = open(path, flags | (create ? O_CREAT : 0), LEDGER_FILE_MODE);
     if (fd < 0) return NULL;
     if ((flags & O_ACCMODE) == O_RDONLY)
@@ -1202,7 +1082,6 @@ ledger_open_private(const char *path, int flags, const char *fmode, int create)
     FILE *fp = fdopen(fd, fmode);
     if (fp == NULL) { (void) close(fd); return NULL; }
     return fp;
-#endif
 }
 
 /* Counts existing lines in the CSV mirror (0 if it doesn't exist yet).
@@ -1431,17 +1310,12 @@ ledger_head_read(ledger_head_rec_t *recs, int max)
     return n;
 }
 
-/* Renames `tmp` over `dst`. POSIX rename() replaces an existing file
- * atomically; the Windows C runtime's rename() refuses to, so the
- * platform's replace-move is used there. */
+/* Renames `tmp` over `dst`; rename() replaces an existing file
+ * atomically. */
 static bool
 ledger_replace_file(const char *tmp, const char *dst)
 {
-#if defined(_WIN32) || defined(__CYGWIN__)
-    return MoveFileExA(tmp, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-#else
     return rename(tmp, dst) == 0;
-#endif
 }
 
 /* Replaces the head file with `recs`. The write goes to a temporary file
@@ -1479,11 +1353,7 @@ ledger_head_write(const ledger_head_rec_t *recs, int n)
     if (ok) ok = (fflush(fp) == 0);
     if (ok)
     {
-#if defined(_WIN32) || defined(__CYGWIN__)
-        ok = (_commit(_fileno(fp)) == 0);
-#else
         ok = (fsync(fileno(fp)) == 0);
-#endif
     }
     fclose(fp);
     if (!ok) { (void) remove(tmp); return false; }
@@ -1662,13 +1532,8 @@ ledger_anchor_publish(int kind, long long rows,
 
     if (mode == LEDGER_ANCHOR_SYSLOG)
     {
-#ifndef _WIN32
         syslog(LOG_INFO, "%s", line);
         return;
-#else
-        /* No system logger on this platform: the line goes to standard
-         * error rather than being dropped. */
-#endif
     }
     fprintf(stderr, "%s\n", line);
     fflush(stderr);
@@ -1905,24 +1770,15 @@ ledger_repair_torn_tail(void)
     if (torn_at >= 0L)
     {
         /* ledger_open_for_read handed us a read-only FILE*: truncating
-         * through it (ftruncate/_chsize both write) fails on every
-         * platform -- on Windows with EACCES -- so a torn tail could
+         * through it (ftruncate writes) fails, so a torn tail could
          * never actually be repaired and one bad append bricked the
          * file for good. Reopen read-write for the truncate. */
         fclose(fp);
-#if defined(_WIN32) || defined(__CYGWIN__)
-        FILE *wr = ledger_open_private(ledger_path(), O_RDWR, "r+b", 0);
-        if (wr == NULL) return false;
-        int rc = _chsize(_fileno(wr), torn_at);
-        int werr = errno;
-        fclose(wr);
-#else
         FILE *wr = ledger_open_private(ledger_path(), O_RDWR, "r+b", 0);
         if (wr == NULL) return false;
         int rc = ftruncate(fileno(wr), torn_at);
         int werr = errno;
         fclose(wr);
-#endif
         if (rc != 0) { errno = werr; return false; }
         /* fp was already closed above (read-only handles can't
          * truncate) -- the trailing fclose(fp) below is for the
@@ -2066,7 +1922,7 @@ ledger_write_entry(fsql_storage_user_ctx user, int kind,
         /* C11 7.21.5.3: on an update-mode stream ("w+b"), a write must
          * be followed by an fflush or a reposition before any read.
          * The scan below reads right after this header write; without
-         * the flush the Windows CRT has been observed to write out the
+         * the flush a C runtime may write out the
          * stream's whole 4096-byte buffer (header plus zero filler),
          * which the scan then parses as a tail of zero-length records
          * -- a corrupted ledger from the very first append. */
@@ -2196,13 +2052,8 @@ ledger_write_entry(fsql_storage_user_ctx user, int kind,
      * CSV mirror below would record a row the binary chain lacks). */
     if (ok) ok = (fflush(fp) == 0);
     if (!ok) ledger_log_exit("fflush");
-#if defined(_WIN32) || defined(__CYGWIN__)
-    if (ok) ok = (_commit(_fileno(fp)) == 0);
-    if (!ok) ledger_log_exit("_commit");
-#else
     if (ok) ok = (fsync(fileno(fp)) == 0);
     if (!ok) ledger_log_exit("fsync");
-#endif
     fclose(fp);
 
     if (ok)
@@ -2243,11 +2094,7 @@ ledger_write_entry(fsql_storage_user_ctx user, int kind,
  * memory. A per-kind slot keeps every kind's buffer alive until that
  * same kind is read again. */
 #define LEDGER_READ_SLOTS (LEDGER_MAX_KIND + 1)   /* indexed by kind */
-#if defined(_WIN32) || defined(__CYGWIN__)
-static __declspec(thread) uint8_t *t_last_read_blob[LEDGER_READ_SLOTS];
-#else
 static __thread uint8_t *t_last_read_blob[LEDGER_READ_SLOTS];
-#endif
 
 static int
 ledger_read_entry(fsql_storage_user_ctx user, int kind,

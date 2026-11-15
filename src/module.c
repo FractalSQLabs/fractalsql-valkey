@@ -33,9 +33,6 @@
  * The statically linked core archive is the sovereign community build.
  */
 
-#if defined(_MSC_VER) && !defined(__attribute__)
-#  define __attribute__(x)
-#endif
 
 #include "fv_common.h"
 

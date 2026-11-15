@@ -5,9 +5,10 @@
 # FractalSQL Feature Specification
 
 FractalSQL for Valkey is a module: commands you call from any Valkey client, running in the server
-process with the FractalSQL core statically linked. There is no SQL layer here; vectors live in ordinary
-string keys as packed little-endian float32, and the columns a SQL product keeps beside a vector (an id, some
-content, a filter attribute) are companion hashes whose field is the row index.
+process with the FractalSQL core statically linked. Vectors live in ordinary string keys as packed
+little-endian float32, and what you would keep beside a vector (an id, some content, a filter attribute) lives in
+companion hashes whose field is the row index. Search, reasoning and the agents are the building blocks for agentic
+workflows that run beside your data.
 
 ## 🏗️ Capability Tiering Model
 
@@ -36,11 +37,6 @@ Pure SFS convergence to the minimum cosine distance to a query, returning the to
 (`dim x N` packed float32; `dim` is the query's length). It is a "precision" tool for finding the nearest rows. It
 ranks by **cosine distance**, so a brute-force check must too.
 
-### Convergence Trace
-The SQL editions expose the search's per-generation trace (`fractal_search_debug`). **Not available on Valkey** as a
-command. `SCHEDULE_WORKLOAD` runs the same corpus-free convergence internally, but returns only the refined point's match,
-not the trace.
-
 ### Scout Discovery (`FRACTAL.EXPLORE`)
 An SFS population search that disperses its particles across the data's distinct basins of attraction, instead of
 the "mode collapse" common in top-K search, and returns the population. Its reach grows with the population (40
@@ -49,13 +45,12 @@ see [Benchmarks & Scaling](#-benchmarks--scaling) for what that costs.
 
 ### Diversify / Repulsion Sessions
 A named session remembers what a caller rejected and pushes later searches away from it (`FRACTAL.DIVERSIFY.ENABLE`, `FRACTAL.FEEDBACK`, and
-`SESSION <name>` on a search). It is the Valkey form of the SQL editions' per-connection diversification: named by you, so it survives reconnects and
+`SESSION <name>` on a search). It is named by you, so it survives reconnects and
 proxies, bounded in number and idle lifetime, and never touching a key. See [Discovery](api-discovery.md#diversify--repulsion-sessions).
 
-### Table-Backed Telemetry
-The SQL products return the *K* nearest real table rows through a stored procedure. On Valkey that **is**
-`FRACTAL.SEARCH` over a corpus key, and the agents add `IDS`, `CONTENT` and `FILTER` companion hashes to resolve ids,
-content and a cohort. This is the ground-truth layer used by every retrieval-backed agent.
+### Ground-Truth Retrieval
+`FRACTAL.SEARCH` over a corpus key returns the *K* nearest real rows, and the agents add `IDS`, `CONTENT` and `FILTER`
+companion hashes to resolve ids, content and a cohort. This is the ground-truth layer used by every retrieval-backed agent.
 
 ---
 
@@ -74,10 +69,6 @@ See [api-cognition.md](api-cognition.md).
 ### Semantic Embeddings (`FRACTAL.EMBED`)
 Returns an embedding as a packed float32 vector, ready to `SET` as a corpus row or search with. See
 [api-cognition.md](api-cognition.md).
-
-### Safe Text-to-SQL
-**Not available on Valkey**: there is no SQL engine to introspect or validate against. See
-[text-to-sql-setup.md](text-to-sql-setup.md) for what to use instead.
 
 ---
 
@@ -119,8 +110,6 @@ The five building blocks the agents above compose. Call them directly to build y
 | `FRACTAL.AGENT.PLAN_EXPLORE` | Scout-search-driven exploration of multiple non-overlapping strategy branches. |
 | `FRACTAL.AGENT.TRAJECTORY_PREDICT` | Forecasts where a state sequence is heading from a delta against a key's historical rows. |
 | `FRACTAL.AGENT.DETECT_LOOP` | Flags repetitive agent loops via SimHash state fingerprints and Brent's cycle detector, with a DFA check. |
-
-The SQL editions' sixth building block, `fractal_sql_agent` (self-correcting NL-to-SQL), has no Valkey equivalent; see Tier 2.
 
 ### Safe Agency & Guardrails
 
@@ -216,7 +205,7 @@ replacement for an index. Use it where diversity, analytics or an agent matters 
 not full-corpus top-k at scale), and use valkey-search for retrieval at scale.
 
 `bench/head_to_head.py` runs the same clustered dataset through valkey-search's HNSW and `FRACTAL.EXPLORE`, and reports latency and
-how many distinct clusters each answer covers ([bench/README.md](../bench/README.md)). Expect the pattern the SQL editions report: HNSW
+how many distinct clusters each answer covers ([bench/README.md](../bench/README.md)). Expect this pattern: HNSW
 returns about one cluster in single-digit milliseconds, and Scout returns several clusters in more time. Run it on your own hardware and
 corpus before relying on a number.
 
@@ -240,7 +229,6 @@ most 200,000 rows.
 **Cognition**
 - `FRACTAL.REASON query [context_json]`: LLM dispatch. → **[api-cognition.md](api-cognition.md)**
 - `FRACTAL.EMBED text`: Semantic vector generation. → **[api-cognition.md](api-cognition.md)**
-- Text-to-SQL: not provided. → **[text-to-sql-setup.md](text-to-sql-setup.md)**
 
 **Agency**
 - `FRACTAL.AGENT.ROUTE_TASK ...`: Sub-agent dispatch. → **[api-agency.md](api-agency.md)**

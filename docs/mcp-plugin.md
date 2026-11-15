@@ -329,7 +329,7 @@ raw bytes as `{"hex": ..., "bytes": n}`, a list as `{"items": [...]}`.
 
 ## Errors
 
-Every failure has a class, the same five as the SQL editions:
+Every failure has a class, five classes:
 
 | `error_class` | Meaning | Examples |
 | --- | --- | --- |
@@ -583,8 +583,7 @@ exactly 64 bytes).
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `FRACTALSQL_CONFIG` | `/etc/fractalsql/fractalsqld.conf` on Linux, `C:\ProgramData\FractalSQL\fractalsqld.conf` on Windows | The daemon's configuration file. `-c <path>` overrides it |
-| `FRACTALSQL_PROFILE_FLUSH_MS` | none | Flush interval for the coverage counters. Only a Windows build instrumented for coverage reads it; a normal build ignores it and says so in its log |
+| `FRACTALSQL_CONFIG` | `/etc/fractalsql/fractalsqld.conf` | The daemon's configuration file. `-c <path>` overrides it |
 | `FRACTALSQL_ENTERPRISE_LIB` | none | The enterprise shared library the daemon loads. The `enterprise_lib` config key wins over it, and it cannot be changed while a library is already loaded |
 | `FRACTALSQL_ENTERPRISE_LEDGER_PATH` | `fractalsql_ledger.dat`, relative to the daemon's working directory | Where the ledger file is written. The `enterprise_ledger_path` config key wins over it |
 | `FRACTALSQL_ENTERPRISE_LEDGER_KEY` | none | The HMAC key that authenticates ledger records and the head file's own MAC. The `enterprise_ledger_key` config key wins over it |
@@ -600,13 +599,9 @@ exactly 64 bytes).
 | `FRACTALSQL_HTTP_THINK_PROVIDER` | none | The older spelling of `FSQL_REASONING_HTTP_THINK_PROVIDER`; the newer name wins |
 | `FRACTALSQL_HTTP_NATIVE_URL` | none | The older spelling of `FSQL_REASONING_HTTP_NATIVE_URL`; the newer name wins |
 | `FRACTALSQL_HTTP_NUM_CTX` | none | The older spelling of `FSQL_REASONING_HTTP_NUM_CTX`; the newer name wins |
-| `FRACTALSQL_TEXT_TO_SQL_MAX_ATTEMPTS` | `2` | How many times the text-to-SQL tier retries a generated statement. 1 to 10; a value outside that range is ignored |
-| `FRACTALSQL_TEXT_TO_SQL_ALLOWED_STATEMENTS` | `select` | `select`, or `select_insert_update` to let the tier write |
-| `FRACTALSQL_TEXT_TO_SQL_USE_REVIEW` | off | Routes the generated statement through the review tier before it is returned. Any non-empty value except `0` turns it on |
 
 A provider setting is read from the daemon's environment only when the config file does not carry the matching key, and the config file wins. Where both
-spellings of a setting are present in the environment, the `FSQL_REASONING_HTTP_*` name is the one the reasoning tier reads; the text-to-SQL tier reads the
-older `FRACTALSQL_HTTP_*` names.
+spellings of a setting are present in the environment, the `FSQL_REASONING_HTTP_*` name is the one the reasoning tier reads.
 
 The server's own version and protocol name are compiled in rather than read from the environment, and are reported by the `fractal_version` tool and
 the `fractalsql://config` resource.
@@ -617,7 +612,7 @@ tool's destructive, read-only or idempotent hint stops the server (exit 3) until
 **Cancellation.** `$/cancel` stops the *wait*: the server drops its connection to Valkey (`CLIENT KILL ID`), the call returns cancelled, and the next call reconnects. The work a module
 command already started on Valkey's side cannot be interrupted and finishes; its reply is discarded.
 
-**Platforms.** Linux and macOS, like the module. Windows is not supported. On macOS the server uses Homebrew's OpenSSL (`brew install openssl@3`); the module itself does not.
+**Platforms.** Linux and macOS, like the module. On macOS the server uses Homebrew's OpenSSL (`brew install openssl@3`); the module itself does not.
 
 ## Testing
 

@@ -13,18 +13,13 @@
  */
 
 #include "fractalsql_config.h"
-#include "fractalsql_msvc_compat.h"  /* setenv on MSVC */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(_WIN32)
-#  include <Windows.h>
-#else
 #  include <pthread.h>
-#endif
 
 /* Writes a one-line reason into the caller's buffer. The `err`
  * argument is OPTIONAL -- a caller that does not want the reason
@@ -119,9 +114,7 @@ int fractal_config_key_by_name(const char *name)
  * validation happens at configuration time instead of surfacing later
  * as a load failure with no context.
  *
- * Windows accepts a drive-letter path ("C:\dir\file", "C:/dir/file"),
- * a UNC path ("\\server\share\file") and a rooted path ("\dir\file").
- * POSIX accepts a rooted path ("/dir/file"). A relative path is
+ * A rooted path ("/dir/file") is accepted. A relative path is
  * refused: the daemon's working directory is not a contract, so a
  * relative path would resolve differently depending on how the
  * daemon was started. */
@@ -141,16 +134,7 @@ int fractal_config_validate_path(const char *path, char *err, size_t errcap)
         return -1;
     }
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-    if (((path[0] >= 'A' && path[0] <= 'Z') ||
-         (path[0] >= 'a' && path[0] <= 'z')) && path[1] == ':' &&
-        (path[2] == '\\' || path[2] == '/'))
-        is_abs = 1;
-    if (path[0] == '\\' && path[1] == '\\') is_abs = 1;   /* UNC */
-    if (path[0] == '\\' || path[0] == '/') is_abs = 1;     /* rooted */
-#else
     if (path[0] == '/') is_abs = 1;
-#endif
 
     if (!is_abs) {
         CFG_SET_ERR(err, errcap,
@@ -190,28 +174,9 @@ static uint64_t      g_clock = 0;
 /* ------------------------------------------------------------------ */
 /* Portable lock (same shim as fractalsql_session.c's).               */
 /* ------------------------------------------------------------------ */
-#if defined(_WIN32)
-static INIT_ONCE        g_lock_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_lock;
-
-static BOOL CALLBACK
-init_lock_once(PINIT_ONCE ip, PVOID param, PVOID *ctx)
-{
-    (void) ip; (void) param; (void) ctx;
-    InitializeCriticalSection(&g_lock);
-    return TRUE;
-}
-static void cfg_lock(void)
-{
-    InitOnceExecuteOnce(&g_lock_once, init_lock_once, NULL, NULL);
-    EnterCriticalSection(&g_lock);
-}
-static void cfg_unlock(void) { LeaveCriticalSection(&g_lock); }
-#else
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static void cfg_lock(void)   { pthread_mutex_lock(&g_lock); }
 static void cfg_unlock(void) { pthread_mutex_unlock(&g_lock); }
-#endif
 
 /* Caller holds the lock. */
 static fsq_cfg_entry *
@@ -470,7 +435,7 @@ bool fractal_config_lookup_str(unsigned long long session_id, const char *name,
     if (e != NULL && e->values[key_id] != NULL) {
         if (out != NULL && outcap > 0) {
             /* Copy with an explicit length: strncpy would pad the
-             * whole buffer and MSVC deprecates it outright. */
+             * whole buffer. */
             const char *src = e->values[key_id];
             size_t n = strlen(src);
             if (n > outcap - 1) n = outcap - 1;
@@ -764,28 +729,9 @@ const char *const fsq_cfg_bridge_vars[FSQ_CFG_BRIDGE_VAR_COUNT] = {
 /* The environment lock is separate from the overlay lock above: the
  * overlay lock guards the per-session table, this one guards the
  * process-wide environment the four tiers publish into. */
-#if defined(_WIN32)
-static INIT_ONCE        g_env_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_env_lock;
-
-static BOOL CALLBACK
-init_env_once(PINIT_ONCE ip, PVOID param, PVOID *ctx)
-{
-    (void) ip; (void) param; (void) ctx;
-    InitializeCriticalSection(&g_env_lock);
-    return TRUE;
-}
-void fractal_config_env_lock(void)
-{
-    InitOnceExecuteOnce(&g_env_once, init_env_once, NULL, NULL);
-    EnterCriticalSection(&g_env_lock);
-}
-void fractal_config_env_unlock(void) { LeaveCriticalSection(&g_env_lock); }
-#else
 static pthread_mutex_t g_env_lock = PTHREAD_MUTEX_INITIALIZER;
 void fractal_config_env_lock(void)   { pthread_mutex_lock(&g_env_lock); }
 void fractal_config_env_unlock(void) { pthread_mutex_unlock(&g_env_lock); }
-#endif
 
 /* FNV-1a, 64-bit. */
 #define FNV_OFFSET_BASIS 1469598103934665603ULL

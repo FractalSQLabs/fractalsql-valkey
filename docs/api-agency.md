@@ -15,11 +15,9 @@ inputs it needs, what it returns, a runnable example with its real output, and t
 build a recipe that is not in the box, see [Composing your own](#composing-your-own) and
 [Building blocks](#building-blocks-the-primitives-agents-compose) further down.
 
-> **Every agent here is a command, and its "tables" are keys.** Valkey has no SQL layer, so there is no table to name and
-> no column to point at. An agent reads its inputs from **keys**: a series is a string key of packed little-endian
-> float32; a table of rows is a **corpus key** (`dim` floats per row, back to back); and the columns the SQL products
-> read beside the vector (an id, some content, a filter attribute) are **companion hashes** whose field is the row
-> index. A vector argument is a packed float32 blob, exactly as `FRACTAL.SEARCH` takes it. Every example on this page is
+> **Every agent here is a command, and its "tables" are keys.** An agent reads its inputs from **keys**: a series is a string key of packed little-endian
+> float32; a set of rows is a **corpus key** (`dim` floats per row, back to back); and what sits beside each vector
+> (an id, some content, a filter attribute) lives in **companion hashes** whose field is the row index. A vector argument is a packed float32 blob, exactly as `FRACTAL.SEARCH` takes it. Every example on this page is
 > a plain command; the replies shown were produced by running it.
 
 ---
@@ -89,8 +87,7 @@ the narrative with `null`, adding `reasoning_step_failed` with the error:
 ```
 
 This is the shape of every example reply below, because the examples were run without a reasoner. With one configured the
-narrative field holds its text and `reasoning_step_failed` is absent. `SEARCH_AGENT` and `RAG_AGENT` are the exception, as in the
-the other editions: by default a reasoning failure after retrieval is an **error**; load the module with
+narrative field holds its text and `reasoning_step_failed` is absent. `SEARCH_AGENT` and `RAG_AGENT` are the exception: by default a reasoning failure after retrieval is an **error**; load the module with
 `agent-partial-reasoning-fail yes` to get the retrieval plus `reasoning_step_failed` instead.
 
 ---
@@ -584,7 +581,7 @@ FRACTAL.AGENT.DIVERSE_PORTFOLIOS mu cov cardinality [N_RESTARTS n] [OVERLAP x] [
 
 ### A note on id resolution
 
-The SQL products resolve a result's id from an `id_col` of the table. On Valkey a result row is an **index into the corpus
+A result row is an **index into the corpus
 key**, and its id comes from a companion hash you name with `IDS`: field `"<row index>"`, value the id. Without `IDS` the id
 is the integer index. `CONTENT` works the same way for a row's text, and `FILTER hash value` keeps only the rows whose entry in
 `hash` equals `value` (a cohort). Rows missing from a hash are treated as having no id, no content, or (for `FILTER`) as not in

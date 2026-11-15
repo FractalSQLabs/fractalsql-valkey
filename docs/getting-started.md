@@ -154,8 +154,7 @@ valkey-cli FRACTAL.EDITION          # Community
 ```
 
 The floor is **glibc 2.34** (Ubuntu 22.04+, Debian 12+, RHEL 9+). Platforms are
-Linux and macOS, amd64 and arm64; there is no Windows build, because Valkey has no
-native Windows server.
+Linux and macOS, amd64 and arm64.
 
 Load-time options (all optional): `threads N` (worker threads, default 4),
 `max-inflight-mb M` (cap on decoded input held by running jobs, default 1024),

@@ -4,8 +4,7 @@
 
 # Composition Guide: Build Your Own Agent
 
-The twenty-one [agents](api-agency.md) cover the common recipes. When one is close but not right, you build your own from the same pieces. The SQL editions
-compose primitives with stored procedures; Valkey has no stored procedures, so composition happens in your application, and the module's job is to make each
+The twenty-one [agents](api-agency.md) cover the common recipes. When one is close but not right, you build your own from the same pieces. Composition happens in your application, and the module's job is to make each
 step a single cheap command next to the data. These are the patterns the [starter kits](starter-kits.md) use.
 
 ## The building blocks
@@ -123,8 +122,7 @@ decision = {"threat_score": drift["drift"], "triage_summary": note, "reasoning_s
 
 ## Safe Agency & Guardrails
 
-- **Treat model output as untrusted.** Validate anything a model writes before acting on it, and never run it as a command without an allow-list
-  ([text-to-sql-setup.md](text-to-sql-setup.md)).
+- **Treat model output as untrusted.** Validate anything a model writes before acting on it, and never run it as a command without an allow-list.
 - **Use ACLs.** Anything that sends data to a model is `@dangerous`; give an application account only the `+command` grants it needs, on only the key patterns it needs
   ([reasoning-setup.md](reasoning-setup.md#-security--governance)).
 - **Bound the work.** Cap sizes and iteration counts you accept from callers, as the agents do.

@@ -35,7 +35,7 @@ namespace fsqlmcp
         std::ifstream in( lockPath );
         if( !in ) return true;             // absent: dev-mode friendly, same stance as schema_lock
         std::ostringstream existing; existing << in.rdbuf();
-        // Ignore CR so a lock file written with CRLF on Windows still matches.
+        // Ignore CR so a lock file written with CRLF line endings still matches.
         if( normalizeCrlf( existing.str() ) == rendered ) return true;
         if( diffOut ) *diffOut = existing.str();
         return false;
@@ -44,7 +44,7 @@ namespace fsqlmcp
     void writeSafetyAnnotations( const std::string& lockPath, const std::string& rendered )
     {
         // BINARY mode: the rendered '\n's stay '\n' on every platform — a
-        // text-mode stream would write CRLF on Windows and make the
+        // text-mode stream would write CRLF and make the
         // artifact differ from the Linux copy (the pin's whole point is
         // byte-identical cross-platform content).
         std::ofstream out( lockPath, std::ios::trunc | std::ios::binary );

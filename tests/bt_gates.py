@@ -2,13 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
 #
-# tests/bt_gates.py: the command-level gates of build_test.sh / build_test.ps1.
+# tests/bt_gates.py: the command-level gates of build_test.sh.
 #
 # Usage: bt_gates.py <gate> --host H --port P [--pid N]
 #
 # Talks RESP to a server that already has fractalsql.so loaded, so the same
-# gates run on Linux, macOS, and Windows (against a server in WSL2 or a
-# container). Prints one line per check:
+# gates run on Linux and macOS (against a local server or a container). Prints one line per check:
 #
 #     PASS <gate> <name>
 #     FAIL <gate> <name>: <detail>

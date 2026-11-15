@@ -2,7 +2,7 @@
 %global confdir  /etc/valkey/modules-available
 
 Name:           fractalsql-valkey
-Version:        2.0.0
+Version:        2.0.1
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search module for Valkey
 
@@ -106,6 +106,8 @@ Verify:
 EOF
 
 %changelog
+* Sun Nov 15 2026 FractalSQLabs <ops@fractalsqlabs.io> - 2.0.1-1
+- 2.0.1 release: package metadata (maintainer, vendor, URL) and the install message.
 * Sat Nov 14 2026 FractalSQLabs <ops@fractalsqlabs.io> - 2.0.0-1
 - 2.0.0 release.
 * Fri Oct 30 2026 FractalSQLabs <ops@fractalsqlabs.io> - 1.0.1-1

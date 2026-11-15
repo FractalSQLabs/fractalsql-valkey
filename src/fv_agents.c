@@ -226,8 +226,7 @@ AnomalyTriage_Command(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
  *   IDS hash     field "<row index>" -> the row's id        (default: the index)
  *   CONTENT hash field "<row index>" -> the row's content   (recall only)
  *   FILTER hash value   keeps only rows whose hash field equals `value`
- *                       (the SQL editions' filter_col = filter_val); rows with no
- *                       field are not in the cohort
+ *                       rows with no field are not in the cohort
  * The companion hashes are read on the main thread while the keys are open;
  * the worker only sees the copies. Each is checked against the caller's ACL
  * key permissions, because only the corpus key is a declared key.
@@ -615,10 +614,9 @@ static int RecommendDiverse_Command(RedisModuleCtx *c, RedisModuleString **v, in
 /*
  * TRACK_ANOMALY, DETOUR_CLASSIFY and PATIENT_DETERIORATION_TRIAGE all search
  * for the row nearest to the DELTA (current - baseline), "what has changed"
- * rather than "where am I" (the SQL editions' fractal_search_trajectory), then
+ * rather than "where am I", then
  * add one analytic and one reasoning call. baseline and current are float32 blobs;
- * the subtraction is done in float32 and widened once, as the SQL editions' BLOB path
- * does. Their unused k argument is not provided.
+ * the subtraction is done in float32 and widened once. Their unused k argument is not provided.
  */
 enum { TA_TRACK, TA_DETOUR, TA_PATIENT };
 

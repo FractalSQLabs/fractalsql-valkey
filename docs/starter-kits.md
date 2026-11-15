@@ -7,10 +7,9 @@
 You have the module running ([getting-started.md](getting-started.md)). Now:
 **which end-to-end example do I run for *my* problem?**
 
-FractalSQL for Valkey ships forty-four runnable industry walkthroughs: the forty-two
-verticals the SQL editions ship (twenty-seven **domain
-verticals**, mostly no-model, and fifteen **agentic verticals**, composed multi-step agents),
-plus two that are specific to Valkey. Each kit is a self-contained Python script in
+FractalSQL for Valkey ships forty-four runnable industry walkthroughs: twenty-seven **domain
+verticals**, mostly no-model, fifteen **agentic verticals**, composed multi-step agents,
+and two that are specific to Valkey. Each kit is a self-contained Python script in
 `demo/` (`demo-vertical-*.py`): it builds its own seeded synthetic dataset, loads it into keys, runs the
 commands that genuinely fit that domain, and **checks its own headline result**, exiting
 non-zero if it does not hold. They are re-runnable, deterministic (seeded by the kit's name),
@@ -66,7 +65,7 @@ returns what it computed, with `reasoning_step_failed` naming the error (see
 | Customer support recall + recommend | `demo-vertical-agentic-customer-support.py` | `AGENT.TRAJECTORY_PREDICT`, `AGENT.RECALL_HYBRID`, `AGENT.RECOMMEND_DIVERSE` | [AGENT.TRAJECTORY_PREDICT](api-agency.md#trajectory-predict-fractalagenttrajectory_predict), [AGENT.RECALL_HYBRID](api-agency.md#recall-hybrid-fractalagentrecall_hybrid-pure-retrieval-no-llm), [AGENT.RECOMMEND_DIVERSE](api-agency.md#recommend-diverse-fractalagentrecommend_diverse-pure-retrieval-no-llm) |
 | FinTech portfolio rebalance + MCTS | `demo-vertical-agentic-fintech-mcts.py` | `OPTIMIZE.PORTFOLIO`, `AGENT.REBALANCE_SIBLING`, `AGENT.PLAN_EXPLORE` | [AGENT.REBALANCE_SIBLING](api-agency.md#rebalance-sibling-fractalagentrebalance_sibling), [AGENT.PLAN_EXPLORE](api-agency.md#plan-explore-fractalagentplan_explore) |
 | Sales lead scoring and next best action | `demo-vertical-agentic-next-action-ranking.py` | `AGENT.RECALL_HYBRID`, `AGENT.RECOMMEND_DIVERSE` | [AGENT.RECALL_HYBRID](api-agency.md#recall-hybrid-fractalagentrecall_hybrid-pure-retrieval-no-llm), [AGENT.RECOMMEND_DIVERSE](api-agency.md#recommend-diverse-fractalagentrecommend_diverse-pure-retrieval-no-llm) |
-| DevOps / SRE dispatch + safety | `demo-vertical-agentic-ops-devops.py` | `AGENT.DETECT_LOOP`, `AGENT.ANOMALY_TRIAGE`, `AGENT.OUTLIER_INTERCEPT`, `AGENT.ROUTE_TASK`, `AGENT.RAG_AGENT` | [AGENT.DETECT_LOOP](api-agency.md#detect-loop-fractalagentdetect_loop), [AGENT.ANOMALY_TRIAGE](api-agency.md#anomaly-triage-fractalagentanomaly_triage), [AGENT.OUTLIER_INTERCEPT](api-agency.md#outlier-intercept-fractalagentoutlier_intercept), [AGENT.ROUTE_TASK](api-agency.md#route-task-fractalagentroute_task), [AGENT.RAG_AGENT](api-agency.md#rag-agent-fractalagentrag_agent) |
+| DevOps / SRE dispatch + safety | `demo-vertical-agentic-ops-devops.py` | `AGENT.DETECT_LOOP`, `AGENT.ANOMALY_TRIAGE`, `AGENT.OUTLIER_INTERCEPT`, `AGENT.ROUTE_TASK`, `RAG.AGENT` | [AGENT.DETECT_LOOP](api-agency.md#detect-loop-fractalagentdetect_loop), [AGENT.ANOMALY_TRIAGE](api-agency.md#anomaly-triage-fractalagentanomaly_triage), [AGENT.OUTLIER_INTERCEPT](api-agency.md#outlier-intercept-fractalagentoutlier_intercept), [AGENT.ROUTE_TASK](api-agency.md#route-task-fractalagentroute_task), [RAG.AGENT](api-agency.md#rag-agent-fractalragagent) |
 | E-commerce cart-abandonment recovery | `demo-vertical-agentic-recall-recommendation.py` | `EXPLORE`, `SEARCH`, `AGENT.RECALL_HYBRID`, `AGENT.RECOMMEND_DIVERSE` | [AGENT.RECALL_HYBRID](api-agency.md#recall-hybrid-fractalagentrecall_hybrid-pure-retrieval-no-llm), [AGENT.RECOMMEND_DIVERSE](api-agency.md#recommend-diverse-fractalagentrecommend_diverse-pure-retrieval-no-llm) |
 | Grid balancing (renewables + storage dispatch) | `demo-vertical-climatech-grid-balancing.py` | `OPTIMIZE.PORTFOLIO`, `AGENT.ANOMALY_TRIAGE`, `AGENT.ALLOCATE` | [AGENT.ANOMALY_TRIAGE](api-agency.md#anomaly-triage-fractalagentanomaly_triage), [AGENT.ALLOCATE](api-agency.md#allocate-fractalagentallocate) |
 | Critical-consumables inventory & depot replenishment | `demo-vertical-critical-inventory-routing.py` | `DIM.DFA`, `AGENT.ALLOCATE` | [AGENT.ALLOCATE](api-agency.md#allocate-fractalagentallocate) |
@@ -234,7 +233,7 @@ Commands: `AGENT.RECALL_HYBRID`, `AGENT.RECOMMEND_DIVERSE`.
 
 ### DevOps / SRE — `demo-vertical-agentic-ops-devops.py`
 DevOps / SRE: dispatch, loop detection and safety checks for an autonomous operator. FRACTAL.AGENT.DETECT_LOOP catches a stuck remediation loop (a period-2 toggle that the DFA exponent alone cannot see); FRACTAL.AGENT.ANOMALY_TRIAGE scores a drifting latency series; FRACTAL.AGENT.OUTLIER_INTERCEPT screens a proposed command against known-bad runbook states; FRACTAL.AGENT.ROUTE_TASK dispatches an incident to the best-matching capability. The retrieve-then-reason step (RAG_AGENT) needs an embedding provider and is skipped without one.
-Commands: `AGENT.DETECT_LOOP`, `AGENT.ANOMALY_TRIAGE`, `AGENT.OUTLIER_INTERCEPT`, `AGENT.ROUTE_TASK`, `AGENT.RAG_AGENT`.
+Commands: `AGENT.DETECT_LOOP`, `AGENT.ANOMALY_TRIAGE`, `AGENT.OUTLIER_INTERCEPT`, `AGENT.ROUTE_TASK`, `RAG.AGENT`.
 Skipped here: `RAG_AGENT` needs a provider behind `fractalsqld` and is skipped without one.
 
 ### E-commerce / Cart Recovery Offers — `demo-vertical-agentic-recall-recommendation.py`
@@ -275,7 +274,7 @@ Commands: `AGENT.ROUTE_TASK`, `AGENT.RECALL_HYBRID`.
 
 ## Valkey-native kits
 
-Two kits have no counterpart in the SQL products, because they are what a key-value store next to
+Two kits are specific to Valkey, because they are what a key-value store next to
 your data is for.
 
 ### Semantic cache — `demo-vertical-semantic-cache.py`
@@ -304,16 +303,12 @@ Writing the kits turned up behaviours worth knowing, and each kit encodes them:
   cycle closes, so a smooth, persistent state stream reads as looping; a healthy stream is an unpredictable one.
 - `FRACTAL.DIM.DFA` refuses a constant series; the agents that call it treat that as exponent 0.
 
-## Coming from a SQL edition
+## What some kits need
 
-The same forty-two industry kits ship in every edition. A handful of individual steps differ on Valkey:
-
-| Step in the SQL editions | Kits | On Valkey |
+| Command | Kits | Needs |
 |---|---|---|
-| `fractal_sql_agent`, a question in plain English answered by generated SQL | next-action-ranking, recall-recommendation, customer-support, fintech-mcts | Not provided (no SQL engine). Where the question is a count, the kit answers it with a key lookup. See [text-to-sql-setup.md](text-to-sql-setup.md). |
-| `fractal_vectorizer_*`, embed a table column through a queue | fintech-mcts, scenario-planning-simulation | The same job is `FRACTAL.EMBED` with a destination key; the kits do not exercise it. See [vectorizer-setup.md](vectorizer-setup.md). |
-| `fractal_agent_plan_explore`, `fractal_rag_agent` | fintech-mcts, scenario-planning-simulation, ops-devops | Provided; they embed text, so they need an embedding provider behind `fractalsqld` and are skipped without one. |
-| `fractal_agent_diverse_portfolios` | periodicity-portfolio-selection | Provided (`FRACTAL.AGENT.DIVERSE_PORTFOLIOS`); it needs the enterprise tier, and the kit skips it on a Community install. |
+| `AGENT.PLAN_EXPLORE`, `RAG.AGENT` | fintech-mcts, scenario-planning-simulation, ops-devops | They embed text, so they need an embedding provider behind `fractalsqld`, and the kits skip them without one. |
+| `AGENT.DIVERSE_PORTFOLIOS` | periodicity-portfolio-selection | The enterprise tier; the kit skips it on a Community install. |
 
 ## Other industry labels, same kits
 

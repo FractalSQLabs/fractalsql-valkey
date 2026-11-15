@@ -4,10 +4,6 @@
 #include <fstream>
 #include <algorithm>
 #include <atomic>
-#ifdef _WIN32
-  #include <io.h>
-  #include <fcntl.h>
-#endif
 #include "jsonrpc_server.h"
 #include "transport_stdio.h"
 #include "transport_http.h"

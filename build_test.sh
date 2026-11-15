@@ -94,8 +94,7 @@
 #                                    both interpose the allocator. Deliberately NOT in DEFAULT and
 #                                    not in CI: --fault is a local, on-demand run.)
 #
-# Platforms: Linux and macOS, amd64 and arm64. (No Windows: Valkey has no
-# native Windows server, so there is deliberately no build_test.ps1.)
+# Platforms: Linux and macOS, amd64 and arm64.
 #
 # Usage:
 #   ./build_test.sh                  # DEFAULT
@@ -1273,7 +1272,7 @@ gate_34_session_params() {
 # include/<platform>/; it reads files only.
 gate_32_plugin_sig_vendored() {
   local n=0 bad=0 f
-  for f in "$HERE"/include/*/fractalsql-reasoning-http.so "$HERE"/include/*/fractalsql-reasoning-http.dll; do
+  for f in "$HERE"/include/*/fractalsql-reasoning-http.so; do
     [ -f "$f" ] || continue
     n=$((n + 1))
     if [ ! -f "${f}.sig" ] || [ "$(wc -c < "${f}.sig" | tr -d ' ')" -ne 64 ]; then

@@ -516,7 +516,7 @@ namespace
 
     // FRACTAL.SEARCH / FRACTAL.EXPLORE with either a stored corpus key or an inline corpus. An inline corpus is
     // written to a short-lived scratch key, searched, and deleted again, so the tool works on data the caller
-    // has in hand exactly as the SQL editions' inline-corpus form does.
+    // has in hand.
     Json searchHandler( Db& db, const Tool& t, const Json& args )
     {
         const bool hasKey = args.contains( "corpus_key" ), hasInline = args.contains( "corpus" );

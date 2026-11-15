@@ -1,8 +1,7 @@
 name: build-test
 
 # Runs ./build_test.sh, the same gate runner used locally, so local == CI.
-# Platforms: Linux and macOS, amd64 and arm64. (No Windows: Valkey has no
-# native Windows server.)
+# Platforms: Linux and macOS, amd64 and arm64.
 
 on:
   push:

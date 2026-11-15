@@ -5,7 +5,7 @@
 """Engine-agnostic robustness probes for the fractalsql-*-mcp C++ servers.
 
 Run from the end of mcp_smoke_client.py (it imports this module and calls
-run(check)), so it rides the existing MCP gate on POSIX and on Windows with
+run(check)), so it rides the existing MCP gate with
 the same environment contract and no new gate to register:
 
   MCP_SERVER_EXE   the server binary just built        (required)
@@ -28,7 +28,7 @@ FractalSQL servers and that every server shares by construction:
      handler must see it absent.
   4. sanitizeSecrets ran std::regex over engine error text; std::regex recurses
      per character, so a long message threw regex_error(error_complexity)
-     (MSVC) or could exhaust the stack. A very long string must come back as an
+     or could exhaust the stack. A very long string must come back as an
      ordinary error, and the C++ probe (sanitize_probe.cpp) differential-tests
      the linear replacement against the old regexes.
 
@@ -510,31 +510,22 @@ def _http_phase(exe, cwd, check):
 
 def _sanitize_probe(here, check):
     """Compile and run the C++ differential probe (old regexes vs the linear
-    scanners) when a compiler is on PATH. The long-string tool calls above are
-    what covers Windows/MSVC, where no g++ is present."""
+    scanners) when a compiler is on PATH."""
     src = os.path.join(here, "tests", "sanitize_probe.cpp")
     errors = os.path.join(here, "src", "errors.cpp")
     cxx = os.environ.get("CXX") or shutil.which("g++") or shutil.which("clang++")
     if not (os.path.isfile(src) and os.path.isfile(errors) and cxx):
         print("SKIP robustness: sanitize_probe (no compiler or probe source present)")
         return
-    # The probe links the compiler's own runtime (libstdc++/libgcc on MinGW).
-    # Any other directory on PATH may ship a same-named DLL -- a database's
-    # bin may do the same, with libwinpthread-1.dll -- and the loader then binds that
-    # one instead, so the exe dies with STATUS_DLL_NOT_FOUND before it can
-    # print a line. Put the compiler's own bin directory first.
-    env = dict(os.environ)
-    cxx_dir = os.path.dirname(os.path.abspath(cxx))
-    env["PATH"] = cxx_dir + os.pathsep + env.get("PATH", "")
     with tempfile.TemporaryDirectory() as td:
         exe = os.path.join(td, "sanitize_probe")
         b = subprocess.run([cxx, "-std=c++17", "-O1", "-I", os.path.join(here, "src"), src, errors, "-o", exe],
-                           capture_output=True, text=True, env=env)
+                           capture_output=True, text=True)
         if b.returncode != 0:
             check("robustness: sanitize_probe builds", False)
             print(b.stderr[-600:])
             return
-        r = subprocess.run([exe], capture_output=True, text=True, timeout=300, env=env)
+        r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
         print(r.stdout.strip())
         if r.returncode != 0:
             print("probe exit code %s; stderr: %s" % (r.returncode, r.stderr.strip()[-400:]))

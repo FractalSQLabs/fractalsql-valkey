@@ -69,9 +69,8 @@ composition examples.
 
 - The default size is small. Scout's cost grows with rows x dimension, so raise `--n` gradually, and avoid a machine
   that other work shares.
-- "recall" in the table is the number of distinct clusters a method's answer covers, as in the
-  SQL editions' benchmark, not nearest-neighbour recall against ground truth.
+- "recall" in the table is the number of distinct clusters a method's answer covers, not nearest-neighbour recall against ground truth.
 - The script creates only `hh:*` keys and one `hh_idx` index, and removes them when it ends.
 - Numbers are not quoted here: they depend on your hardware, corpus and Valkey version, so run it on yours. The pattern to
-  expect is the one the SQL editions report: HNSW returns about one cluster in a few milliseconds, and Scout returns
+  expect: HNSW returns about one cluster in a few milliseconds, and Scout returns
   several clusters in more time.

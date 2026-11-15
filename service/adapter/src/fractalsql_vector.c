@@ -47,11 +47,7 @@
 #include "fractalsql_sql.h"   /* fsql_vector_* */
 #include "fractalsql_parse.h" /* parse_vector_csv (shared with fractalsql.c) */
 
-#if defined(_WIN32) || defined(__CYGWIN__)
-#  define FRACTAL_EXPORT __declspec(dllexport)
-#else
 #  define FRACTAL_EXPORT
-#endif
 
 /* Same stderr-mirroring SFS_INIT_ERROR as fractalsql_cognition.c
  * (duplicated per translation unit by this repo's established

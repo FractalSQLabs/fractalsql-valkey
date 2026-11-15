@@ -326,8 +326,7 @@ namespace fsqlmcp
             // had already gone.
             { std::lock_guard<std::mutex> lk( inflightMu_ ); inflightIds_.erase( requestId ); }
             // The refusal is rethrown after this block, never from inside one:
-            // a throw from a catch block miscompiles under clang on Windows
-            // (MSVC unwinder crash).
+            // a throw from a catch block can miscompile under some clang builds.
             acquireFailure = std::current_exception();
         }
         if( acquireFailure )

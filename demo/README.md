@@ -4,7 +4,7 @@
 
 # FractalSQL demo
 
-Forty-four runnable starter kits, `demo-vertical-*.py` in this directory: the forty-two verticals the SQL editions ship, plus two that are specific to Valkey. Each is a problem you can recognise, solved
+Forty-four runnable starter kits, `demo-vertical-*.py` in this directory: forty-two industry verticals plus two that are specific to Valkey. Each is a problem you can recognise, solved
 with the commands in this module, and each is **self-checking**: it prints its report and
 exits non-zero unless its headline result holds. They are plain Python (standard library
 only) talking RESP to a Valkey server that has the module loaded.
@@ -111,10 +111,6 @@ deterministic generator, `expect(what, ok)` records a check, `done()` exits non-
 failed. A kit is a seeded dataset, a few commands, and the `expect` calls that state what
 should be true.
 
-## Not here
+## Benchmark
 
-The SQL products' demos for text-to-SQL and the vectorizer have no Valkey equivalent: Valkey has no SQL
-layer (see [text-to-sql-setup.md](../docs/text-to-sql-setup.md) and [vectorizer-setup.md](../docs/vectorizer-setup.md)).
-The agents they exercise are all here, as [`FRACTAL.AGENT.*`](../docs/api-agency.md) commands, and a few kits skip an
-individual text-to-SQL or embedding step and say so; [Starter Kits](../docs/starter-kits.md#coming-from-a-sql-edition)
-lists them. The benchmark is [`bench/`](../bench/README.md).
+The benchmark is [`bench/`](../bench/README.md).

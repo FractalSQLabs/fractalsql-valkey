@@ -31,17 +31,6 @@
 #include <ctime>
 #include <algorithm>
 
-#ifdef _WIN32
-  #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-  #endif
-  #include <winsock2.h>
-  #include <ws2tcpip.h>
-  typedef int socklen_t;
-  // Winsock2 has no inet_pton(); the WinSock spelling of the same call is
-  // InetPtonA (Vista+). Same signature, same return convention.
-  #define inet_pton InetPtonA
-#else
   #include <sys/socket.h>
   #include <sys/resource.h>
   #include <sys/time.h>
@@ -50,34 +39,21 @@
   #include <arpa/inet.h>
   #include <unistd.h>
   #include <sys/stat.h>
-#endif
 
-// Close a socket, on either platform. The two spellings are genuinely
-// different functions -- WinSock's closesocket() and POSIX's close() --
-// so this is a small inline shim rather than a macro: a macro named
-// `closesocket` that expanded to `::close` broke the one QUALIFIED call
-// site (`::closesocket(fd)` expanded to `::::close`, which is not a
-// valid expression), and a macro that expanded to a bare `close` would
-// instead be open to a member-function lookup shadowing it. The shim has
-// neither problem: the call is always unqualified and always resolves
-// to the global function.
-#ifdef _WIN32
-  inline void fsqlCloseSocket( int fd ) { ::closesocket( fd ); }
-  inline void fsqlHalfCloseSend( int fd ) { ::shutdown( fd, SD_SEND ); }
-  inline void fsqlSetRecvTimeoutMs( int fd, int ms )
-  { DWORD t = static_cast<DWORD>( ms ); ::setsockopt( fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>( &t ), sizeof( t ) ); }
-#else
+// Close a socket. A small inline shim rather than a macro: a macro that
+// expanded to a bare `close` would be open to a member-function lookup
+// shadowing it, while the call here is always unqualified and always
+// resolves to the global function.
   inline void fsqlCloseSocket( int fd ) { ::close( fd ); }
   inline void fsqlHalfCloseSend( int fd ) { ::shutdown( fd, SHUT_WR ); }
   inline void fsqlSetRecvTimeoutMs( int fd, int ms )
   { timeval t{ ms / 1000, ( ms % 1000 ) * 1000 }; ::setsockopt( fd, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof( t ) ); }
-#endif
 
 // Closes after a refusal reply: half-closes, reads and discards the client's
 // pending request for up to lingerMs, then closes. A plain close with unread
 // data resets the connection, and the reset discards the reply that was just
 // written -- the peer then sees a broken connection instead of the refusal it
-// was owed (seen on Windows).
+// was owed.
 inline void fsqlCloseAfterReply( int fd, int lingerMs )
 {
     fsqlHalfCloseSend( fd );
@@ -92,12 +68,7 @@ inline void fsqlCloseAfterReply( int fd, int lingerMs )
         {
             // No data yet (or a signal landed mid-read): keep waiting for the
             // rest of the peer's request.
-#ifdef _WIN32
-            const int e = WSAGetLastError();
-            if( e != WSAETIMEDOUT && e != WSAEWOULDBLOCK ) break;
-#else
             if( errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR ) break;
-#endif
         }
     }
     fsqlCloseSocket( fd );
@@ -161,23 +132,10 @@ namespace fsqlmcp
     // read again.
     static bool fileMtime( const std::string& path, unsigned long long& out )
     {
-#ifdef _WIN32
-        HANDLE h = CreateFileA( path.c_str(), FILE_READ_ATTRIBUTES,
-                                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr );
-        if( h == INVALID_HANDLE_VALUE ) return false;
-        FILETIME ft{};
-        const bool ok = GetFileTime( h, nullptr, nullptr, &ft ) != 0;
-        CloseHandle( h );
-        if( !ok ) return false;
-        out = ( static_cast<unsigned long long>( ft.dwHighDateTime ) << 32 ) | ft.dwLowDateTime;
-        return true;
-#else
         struct stat st{};
         if( ::stat( path.c_str(), &st ) != 0 ) return false;
         out = static_cast<unsigned long long>( st.st_mtime );
         return true;
-#endif
     }
 
     // The credentials this server accepts.
@@ -215,7 +173,7 @@ namespace fsqlmcp
         {
             // One lock only: the reload reads the credential state, so it
             // runs under the same guard as the compare. A same-thread second
-            // lock on this non-recursive mutex aborts on MSVC and deadlocks
+            // lock on this non-recursive mutex deadlocks
             // forever on glibc.
             std::lock_guard<std::mutex> lk( mu_ );
             const bool forced = g_sighupReload.exchange( false, std::memory_order_relaxed );
@@ -315,15 +273,9 @@ namespace fsqlmcp
             return utcToTimeT( tm );
         }
 
-        // UTC calendar time -> time_t. timegm() is POSIX; the MSVC CRT has
-        // _mkgmtime() instead.
-#if defined( _WIN32 )
-        static std::time_t utcToTimeT( std::tm& tm )
-        { return static_cast<std::time_t>( _mkgmtime( &tm ) ); }
-#else
+        // UTC calendar time -> time_t. timegm() is POSIX.
         static std::time_t utcToTimeT( std::tm& tm )
         { return timegm( &tm ); }
-#endif
 
         void loadPolicyLocked()
         {
@@ -447,11 +399,9 @@ namespace fsqlmcp
             const long x = std::strtol( v, nullptr, 10 );
             if( x > 0 ) n = x;
         }
-#ifndef _WIN32
         rlimit rl{};
         if( getrlimit( RLIMIT_NOFILE, &rl ) == 0 && rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur > 8 )
             n = std::min<long>( n, static_cast<long>( rl.rlim_cur / 2 ) );
-#endif
         return static_cast<std::size_t>( n );
     }
 
@@ -468,15 +418,9 @@ namespace fsqlmcp
     // Bounds how long a read or write on this socket may block.
     static void setSocketTimeoutMs( int fd, int ms )
     {
-#ifdef _WIN32
-        DWORD v = static_cast<DWORD>( ms );
-        setsockopt( fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>( &v ), sizeof( v ) );
-        setsockopt( fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>( &v ), sizeof( v ) );
-#else
         timeval tv{ ms / 1000, ( ms % 1000 ) * 1000 };
         setsockopt( fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof( tv ) );
         setsockopt( fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof( tv ) );
-#endif
     }
 
     // Waits up to `ms` for a pending connection. A handler installed with
@@ -484,13 +428,8 @@ namespace fsqlmcp
     // in short slices and re-checks g_httpSignalled between them.
     static bool waitForConnection( int listenFd, int ms )
     {
-#ifdef _WIN32
-        WSAPOLLFD p{ static_cast<SOCKET>( listenFd ), POLLRDNORM, 0 };
-        return WSAPoll( &p, 1, ms ) > 0;
-#else
         pollfd p{ listenFd, POLLIN, 0 };
         return ::poll( &p, 1, ms ) > 0;
-#endif
     }
 #ifdef SIGHUP
     static void onSighup( int ) { g_sighupReload.store( true, std::memory_order_relaxed ); }
@@ -1762,11 +1701,6 @@ namespace fsqlmcp
         std::signal( SIGTERM, onHttpTermSignal );
         std::signal( SIGINT,  onHttpTermSignal );
 
-#ifdef _WIN32
-        WSADATA wsa{};
-        if( WSAStartup( MAKEWORD( 2, 2 ), &wsa ) != 0 )
-            throw ToolError( ErrorClass::ServerInternal, "WSAStartup failed" );
-#endif
 
         // The registry, the token store and the SSL context are held by
         // SHARED pointer and captured BY VALUE by every connection thread.
@@ -2018,9 +1952,6 @@ namespace fsqlmcp
             std::lock_guard<std::mutex> lk( state->mu );
             for( auto& c : state->conns ) if( c->t.joinable() ) c->t.detach();
         }
-#ifdef _WIN32
-        WSACleanup();
-#endif
         return 0;
     }
 }

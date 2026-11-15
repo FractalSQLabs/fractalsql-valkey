@@ -18,18 +18,13 @@
 
 #include "fractalsql_session.h"
 #include "fractalsql_enterprise.h"
-#include "fractalsql_msvc_compat.h"  /* setenv/unsetenv on MSVC */
 
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-#if defined(_WIN32)
-#  include <Windows.h>
-#else
 #  include <pthread.h>
-#endif
 
 #define FSQL_SESSION_BUCKETS           1024u
 #define FSQL_SESSION_MAX_ENTRIES       4096u
@@ -99,29 +94,9 @@ static unsigned int        g_entry_count = 0;
 /* (this repo builds only against a database client header),    */
 /* so this shims the two platforms directly.                          */
 /* ------------------------------------------------------------------ */
-#if defined(_WIN32)
-static INIT_ONCE       g_lock_once = INIT_ONCE_STATIC_INIT;
-static CRITICAL_SECTION g_lock;
-
-static BOOL CALLBACK
-init_lock_once(PINIT_ONCE ip, PVOID param, PVOID *ctx)
-{
-    (void) ip; (void) param; (void) ctx;
-    InitializeCriticalSection(&g_lock);
-    return TRUE;
-}
-
-static void session_lock(void)
-{
-    InitOnceExecuteOnce(&g_lock_once, init_lock_once, NULL, NULL);
-    EnterCriticalSection(&g_lock);
-}
-static void session_unlock(void) { LeaveCriticalSection(&g_lock); }
-#else
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static void session_lock(void)   { pthread_mutex_lock(&g_lock); }
 static void session_unlock(void) { pthread_mutex_unlock(&g_lock); }
-#endif
 
 /* ------------------------------------------------------------------ */
 /* Internal helpers. Caller must hold the lock for all of these.       */
