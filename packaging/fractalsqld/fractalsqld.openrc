@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
+#
+# OpenRC service for fractalsqld on Alpine (the counterpart of fractalsqld.service on systemd distributions).
+
+name="fractalsqld"
+description="FractalSQL daemon (fractalsqld)"
+
+command="/usr/libexec/fractalsql/fractalsqld"
+command_args="-c /etc/fractalsql/fractalsqld.conf"
+command_user="fractalsql:fractalsql"
+command_background="yes"
+pidfile="/run/fractalsqld.pid"
+directory="/var/lib/fractalsql"
+output_log="/var/log/fractalsqld.log"
+error_log="/var/log/fractalsqld.log"
+
+depend() {
+    use net
+    before valkey
+}
+
+start_pre() {
+    # The socket directory is group-private to the fractalsql group; the state directory holds the
+    # enterprise ledger's default location.
+    checkpath -d -m 0750 -o fractalsql:fractalsql /run/fractalsql
+    checkpath -d -m 0750 -o fractalsql:fractalsql /var/lib/fractalsql
+    checkpath -f -m 0640 -o fractalsql:fractalsql /var/log/fractalsqld.log
+}

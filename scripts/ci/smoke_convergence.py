@@ -23,6 +23,7 @@ Python stdlib only — the GitHub Actions runner has python3; a raw
 socket is simpler to audit in CI than a pip-installed redis-py.
 """
 
+import json
 import math
 import socket
 import struct
@@ -105,18 +106,14 @@ def main():
     assert r.cmd("SET", "corpus", vec) == "OK"
 
     reply = r.cmd("FRACTAL.SEARCH", "corpus", vec, "1")
-    # Reply shape: every Valkey major (7.2 / 8.0 / 8.1) exposes
-    # RedisModule_ReplyWithMap, so we get an RESP3 map (dict from
-    # _parse) on the HELLO-3-negotiated connection. The flat-array
-    # fallback path in the module is retained for 6.2-era Redis
-    # callers; Valkey never takes that branch.
+    # The reply is a JSON document (a bulk string), identical on RESP2 and
+    # RESP3. A server that returns a RESP3 map or a flat key/value array is
+    # still handled, so the check does not depend on the reply framing.
+    if isinstance(reply, (bytes, bytearray, str)):
+        reply = json.loads(reply)
     if isinstance(reply, list):
         reply = {reply[i]: reply[i + 1] for i in range(0, len(reply), 2)}
-    # Keys are emitted via RedisModule_ReplyWithSimpleString, which
-    # hits both RESP2 and RESP3 as a simple-string frame (+...\r\n)
-    # that _parse decodes to `str`. Bulk strings (values like vector
-    # components on RESP2 doubles) come back as `bytes`. Normalize
-    # once so the lookup doesn't depend on which path we took.
+
     def _k(x):
         return x.decode() if isinstance(x, (bytes, bytearray)) else x
     reply = { _k(k): v for k, v in reply.items() }

@@ -1,0 +1,286 @@
+{
+  "name": "fractalsql-valkey-mcp",
+  "server": {
+    "entry_point": "fractalsql-valkey-mcp",
+    "type": "binary"
+  },
+  "tools": [
+    {
+      "description": "Sniper-mode Stochastic Fractal Search: the K nearest rows of a corpus to a query, minimizing cosine distance. Give corpus_key (a stored corpus: rows packed as float32 in one key, see fractal_store_vectors) OR corpus (an inline array of rows). Returns best_point, best_fit and top_k as [{idx, dist}].",
+      "name": "fractal_search"
+    },
+    {
+      "description": "Scout-mode SFS: the whole converged population (every particle's position and fitness) rather than only the top K, for clustering and diversity analysis. Same corpus_key / corpus choice as fractal_search.",
+      "name": "fractal_search_explore"
+    },
+    {
+      "description": "Start (or reset) a diversify session: later searches given the same session avoid the neighbourhoods it has been told to reject.",
+      "name": "fractal_diversify_enable"
+    },
+    {
+      "description": "Turn diversification off for a session (the session and its history stay).",
+      "name": "fractal_diversify_disable"
+    },
+    {
+      "description": "Read a session's diversify parameters, or set some of them with a JSON object (window_n, stall_threshold, repulsion_sigma, repulsion_weight, max_shadows_considered, tail_buffer_cap).",
+      "name": "fractal_diversify_params"
+    },
+    {
+      "description": "Why the last search through a session looked the way it did: D_q, whether diversify is on, and overhead.",
+      "name": "fractal_explain_result"
+    },
+    {
+      "description": "Tell a session how a result was received so later searches steer away from rejected rows.",
+      "name": "fractal_feedback_report"
+    },
+    {
+      "description": "Mark one result as background noise for a session so it is excluded from future repulsion.",
+      "name": "fractal_isolate_background"
+    },
+    {
+      "description": "Drop a diversify session and free its memory.",
+      "name": "fractal_session_close"
+    },
+    {
+      "description": "List the live diversify sessions.",
+      "name": "fractal_session_list"
+    },
+    {
+      "description": "Send a question (and optional JSON context) to the configured reasoning model through the fractalsqld daemon. Needs a daemon with a model; otherwise a clean 'not configured' error.",
+      "name": "fractal_reason"
+    },
+    {
+      "description": "Embed text with the configured embedding model through the fractalsqld daemon; returns the vector.",
+      "name": "fractal_embed"
+    },
+    {
+      "description": "Drift on one entity's metric series, then a model-written triage summary. Returns threat_score, anomaly_type and triage_summary (or the computed half plus reasoning_step_failed when no model answers).",
+      "name": "fractal_agent_anomaly_triage"
+    },
+    {
+      "description": "Cardinality-constrained portfolio optimisation, then a written rationale. Returns the allocation and its Sharpe ratio.",
+      "name": "fractal_agent_allocate"
+    },
+    {
+      "description": "Route a task to the nearest capability under a token budget, with a written justification.",
+      "name": "fractal_agent_route_task"
+    },
+    {
+      "description": "Intercept a proposed state that is too close to a known-bad one. Returns intercepted, the nearest distance and a reason.",
+      "name": "fractal_agent_outlier_intercept"
+    },
+    {
+      "description": "Pure retrieval, no model: the K nearest memories to a query, optionally restricted to a cohort.",
+      "name": "fractal_agent_recall_hybrid"
+    },
+    {
+      "description": "Pure retrieval, no model: K recommendations that are relevant and mutually diverse.",
+      "name": "fractal_agent_recommend_diverse"
+    },
+    {
+      "description": "Natural-language question over a valkey-search index: the model writes a query, the module validates and runs it under YOUR ACL, and the model analyses the rows. Needs valkey-search and a model.",
+      "name": "fractal_agent_data_analyst"
+    },
+    {
+      "description": "Cohort search plus the drift from baseline to current, then a written triage. Returns cohort_matches, a projected trajectory and a summary.",
+      "name": "fractal_agent_patient_deterioration_triage"
+    },
+    {
+      "description": "Self-contained diversify health check: warm a session with the first rows of a corpus, search, and report the diversity quotient. No model.",
+      "name": "fractal_agent_feedback_audit"
+    },
+    {
+      "description": "Place a workload on the nearest node by capability vector, with a written justification and confidence.",
+      "name": "fractal_agent_schedule_workload"
+    },
+    {
+      "description": "Optimise a portfolio, find the most similar past allocation by weight change, and explain the rebalance.",
+      "name": "fractal_agent_rebalance_sibling"
+    },
+    {
+      "description": "Classify a vehicle's detour: nearest fleet peer by route change and the box-counting complexity of its GPS trace, with a written verdict.",
+      "name": "fractal_agent_detour_classify"
+    },
+    {
+      "description": "Track deviation check: nearest peer plus the DFA exponent of the heading series, with a written assessment.",
+      "name": "fractal_agent_track_anomaly"
+    },
+    {
+      "description": "Sensor-grid coverage: morphological dimension and lacunarity of the point cloud plus drift in the telemetry, then an alert.",
+      "name": "fractal_agent_network_coverage_alert"
+    },
+    {
+      "description": "General-purpose regime check on any series: DFA exponent and drift, then a written triage.",
+      "name": "fractal_agent_regime_triage"
+    },
+    {
+      "description": "Enterprise: several mutually different near-optimal portfolios (sharpe) or the return-versus-risk front (pareto), with a written comparison.",
+      "name": "fractal_agent_diverse_portfolios"
+    },
+    {
+      "description": "Embed a seed state and branch it into the nearest strategies. Needs an embedding provider.",
+      "name": "fractal_agent_plan_explore"
+    },
+    {
+      "description": "Project the next state from a time-ordered state log: the drift since a baseline row, applied to the current state. No model.",
+      "name": "fractal_agent_trajectory_predict"
+    },
+    {
+      "description": "Detect an agent stuck in a loop: fingerprint each logged state and find a cycle, tolerating a few differing bits. No model.",
+      "name": "fractal_agent_detect_loop"
+    },
+    {
+      "description": "Embed a question, search the corpus, and answer from the hits. Needs an embedding provider and a model.",
+      "name": "fractal_search_agent"
+    },
+    {
+      "description": "Retrieval-augmented answer: search_agent with a fixed search. Returns the answer, source_doc_ids and timing.",
+      "name": "fractal_rag_agent"
+    },
+    {
+      "description": "Detrended fluctuation analysis exponent of a series: about 0.5 for noise, above 1 for persistent trends.",
+      "name": "fractal_dimension_dfa"
+    },
+    {
+      "description": "Regime drift: the DFA exponent of the recent window against the baseline before it.",
+      "name": "fractal_dimension_drift"
+    },
+    {
+      "description": "Box-counting fractal dimension of a point cloud.",
+      "name": "fractal_dimension_boxcount"
+    },
+    {
+      "description": "Dominant frequencies of a series: the strongest spectral peaks.",
+      "name": "fractal_periodogram"
+    },
+    {
+      "description": "Indices where the series' behaviour changes.",
+      "name": "fractal_change_point_detect"
+    },
+    {
+      "description": "A compact bit fingerprint of a vector (random-hyperplane hash); returns hex bytes.",
+      "name": "fractal_state_fingerprint"
+    },
+    {
+      "description": "Spectral entropy per sliding frame: low for tonal signals, near 1 for noise.",
+      "name": "fractal_spectrogram_entropy"
+    },
+    {
+      "description": "Find a cycle in a stream of fingerprints (Brent's algorithm), tolerating a few differing bits.",
+      "name": "fractal_cycle_detect"
+    },
+    {
+      "description": "Persistent homology of a point cloud: H0 and H1 barcodes.",
+      "name": "fractal_tda_persistence_diagram"
+    },
+    {
+      "description": "Fractal dimension and lacunarity of a point cloud.",
+      "name": "fractal_morphological_complexity"
+    },
+    {
+      "description": "Gyrification index of a mesh: surface area against its convex hull.",
+      "name": "fractal_cortical_folding"
+    },
+    {
+      "description": "Fibre-length density and branch density of a nerve skeleton.",
+      "name": "fractal_nerve_plexus_metric"
+    },
+    {
+      "description": "Tortuosity, branch density and fractal dimension of a vessel tree.",
+      "name": "fractal_vascular_network"
+    },
+    {
+      "description": "Cardinality-constrained Sharpe maximisation by Stochastic Fractal Search.",
+      "name": "fractal_optimize_portfolio"
+    },
+    {
+      "description": "Minkowski L_p distance.",
+      "name": "fractal_vector_lp_distance"
+    },
+    {
+      "description": "Differing bits between two equal-length binary strings (hex).",
+      "name": "fractal_vector_hamming_distance"
+    },
+    {
+      "description": "Scalar int8 quantisation: returns scale and codes (4x smaller).",
+      "name": "fractal_vector_quantize_int8"
+    },
+    {
+      "description": "Sign-bit quantisation: one bit per dimension, as hex bytes.",
+      "name": "fractal_vector_quantize_binary"
+    },
+    {
+      "description": "Walk a ledger chain and report whether it is intact (ok, rows_verified, or the first failure). Needs the daemon.",
+      "name": "fractal_ledger_verify"
+    },
+    {
+      "description": "Entries in the truth ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_truth_count"
+    },
+    {
+      "description": "Entries in the shadow ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_shadow_count"
+    },
+    {
+      "description": "Persist the ledger to its file. Needs the enterprise tier.",
+      "name": "fractal_ledger_flush"
+    },
+    {
+      "description": "Load the persisted ledger into memory. Needs the enterprise tier.",
+      "name": "fractal_ledger_load"
+    },
+    {
+      "description": "Compact the ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_compact"
+    },
+    {
+      "description": "Clear the in-memory shadow state, keeping the truth ledger. Needs the enterprise tier.",
+      "name": "fractal_ledger_reset_soft"
+    },
+    {
+      "description": "Erase the ledger entirely. Irreversible. Needs the enterprise tier.",
+      "name": "fractal_ledger_reset_hard"
+    },
+    {
+      "description": "Append a record to the tamper-evident decision-audit chain (kind 2). Needs the enterprise tier.",
+      "name": "fractal_audit_log"
+    },
+    {
+      "description": "Decode a persisted audit blob (hex) into its JSON.",
+      "name": "fractal_audit_unpack"
+    },
+    {
+      "description": "Enterprise: several mutually different near-optimal portfolios.",
+      "name": "fractal_optimize_portfolio_multimodal"
+    },
+    {
+      "description": "Enterprise: the non-dominated return-versus-risk front.",
+      "name": "fractal_optimize_portfolio_multimodal_pareto"
+    },
+    {
+      "description": "Store rows as a corpus: packs the rows as float32 into one key so fractal_search and the agents can use it. Honours FSQL_MCP_KEY_PREFIX.",
+      "name": "fractal_store_vectors"
+    },
+    {
+      "description": "Store a numeric series as packed float32 under a key, for the series tools and agents. Honours FSQL_MCP_KEY_PREFIX.",
+      "name": "fractal_store_series"
+    },
+    {
+      "description": "Write a hash: the IDS / CONTENT / FILTER companions the agents read (field = row index). Honours FSQL_MCP_KEY_PREFIX.",
+      "name": "fractal_store_hash"
+    },
+    {
+      "description": "Delete a key (a corpus, series or hash this server wrote). Honours FSQL_MCP_KEY_PREFIX.",
+      "name": "fractal_delete_key"
+    },
+    {
+      "description": "Describe a key: its type and, for a corpus or series, how many float32 values it holds.",
+      "name": "fractal_key_info"
+    },
+    {
+      "description": "The module's version and edition, the Valkey server version and this MCP server's version.",
+      "name": "fractal_version"
+    }
+  ],
+  "version": "2.0.0"
+}

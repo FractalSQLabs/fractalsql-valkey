@@ -1,23 +1,35 @@
 #!/bin/sh
+# shellcheck shell=sh  # Intentionally POSIX: runs in minimal builder stages where bash may be absent.
 # docker/assert_so.sh — zero-dependency posture check for fractalsql.so.
 #
-# Usage: assert_so.sh <path/to/fractalsql.so> <size_ceiling_bytes>
+# Usage: assert_so.sh <path/to/fractalsql.so> <size_ceiling_bytes> [libc_kind]
+#
+# libc_kind: glibc (default) or musl. Selects which ldd shortlist
+# applies. musl bundles libm/libdl/libpthread into a single
+# libc.musl-*.so.1 — the glibc-shaped shortlist would reject the
+# musl libc and flag the build incorrectly.
 #
 # Fails the build if:
-#   * ldd reports any dynamic library outside the glibc shortlist
+#   * ldd reports any dynamic library outside the libc shortlist
 #   * nm reports __cxx11::basic_string symbols (cxx11 ABI leak)
 #   * the .so exceeds the size ceiling
-#   * RedisModule_OnLoad is missing from .dynsym
+#   * RedisModule_OnLoad / ValkeyModule_OnLoad missing from .dynsym
 #
 # Run inside the builder stage so problems are caught before the .so
 # is emitted to the export stage.
 
 set -eu
 
-SO="${1:?usage: assert_so.sh <so> <ceiling>}"
-CEILING="${2:?usage: assert_so.sh <so> <ceiling>}"
+SO="${1:?usage: assert_so.sh <so> <ceiling> [libc_kind]}"
+CEILING="${2:?usage: assert_so.sh <so> <ceiling> [libc_kind]}"
+LIBC_KIND="${3:-glibc}"
 
-echo "=== assert_so.sh ${SO} (ceiling ${CEILING} bytes) ==="
+case "${LIBC_KIND}" in
+    glibc|musl) ;;
+    *) echo "FAIL: unknown libc_kind '${LIBC_KIND}' — expected glibc or musl" >&2; exit 2 ;;
+esac
+
+echo "=== assert_so.sh ${SO} (ceiling ${CEILING} bytes, libc=${LIBC_KIND}) ==="
 
 echo "--- file ---"
 file "${SO}"
@@ -31,19 +43,18 @@ if ldd "${SO}" | grep -E 'libluajit|libstdc\+\+' >/dev/null; then
     exit 1
 fi
 
-# Assertion 2: every library listed by ldd is on the glibc shortlist.
-#   linux-vdso.so.1       (kernel-provided, no file)
-#   libc.so.6
-#   libm.so.6
-#   libdl.so.2            (merged into libc on glibc 2.34+, may still appear)
-#   libpthread.so.0       (merged into libc on glibc 2.34+, may still appear)
-#   /lib*/ld-linux-*.so.* (dynamic loader)
+# Assertion 2: every library listed by ldd is on the libc shortlist.
+if [ "${LIBC_KIND}" = "musl" ]; then
+    LIBC_ALLOWLIST='^(linux-vdso\.so\.1|/lib/ld-musl-[a-z0-9_]+\.so\.1|libc\.musl-[a-z0-9_]+\.so\.1|/lib/libc\.musl-[a-z0-9_]+\.so\.1)$'
+else
+    LIBC_ALLOWLIST='^(linux-vdso\.so\.1|libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|/.*/ld-linux.*\.so\.[0-9]+)$'
+fi
 BAD=$(ldd "${SO}" \
         | awk '{print $1}' \
-        | grep -vE '^(linux-vdso\.so\.1|libc\.so\.6|libm\.so\.6|libdl\.so\.2|libpthread\.so\.0|/.*/ld-linux.*\.so\.[0-9]+)$' \
+        | grep -vE "${LIBC_ALLOWLIST}" \
         | grep -v '^$' || true)
 if [ -n "${BAD}" ]; then
-    echo "FAIL: ${SO} has disallowed dynamic deps:" >&2
+    echo "FAIL: ${SO} has disallowed dynamic deps (libc_kind=${LIBC_KIND}):" >&2
     echo "${BAD}" >&2
     exit 1
 fi
@@ -80,7 +91,7 @@ fi
 # When we compile against Valkey's headers (this Dockerfile's default)
 # the shim rewrites the symbol, so the .so emits ValkeyModule_OnLoad
 # exclusively. When compiled against Redis's self-contained
-# redismodule.h (what redis-fractalsql does) the .so emits
+# redismodule.h (what fractalsql-redis does) the .so emits
 # RedisModule_OnLoad. Accept either — other handler functions
 # (FractalSearch_RedisCommand etc.) can stay static/hidden; only the
 # entry point is resolved by name.

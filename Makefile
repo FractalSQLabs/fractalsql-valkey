@@ -1,73 +1,120 @@
-# valkey-fractalsql Makefile — local (non-Docker) development build.
+# fractalsql-valkey Makefile — local (non-Docker) development build.
 #
-# For shipping multi-arch artifacts use:
-#   ./build.sh        (Docker, static LuaJIT, per-arch .so in ./dist/${arch}/)
+# v1: pure-C path. The module statically links the vendored core
+# archive at include/libfractalsql-community-minimal-c.a. No runtime
+# LuaJIT dep, no pkg-config probe.
 #
-# This Makefile is for quick local iteration. It:
-#   1. Fetches include/redismodule.h from upstream Valkey if missing.
-#   2. Compiles with -O3 -flto.
-#   3. Links LuaJIT dynamically (faster to iterate than static).
+# Refresh include/ from the foundry:
+#     cd ../fractalsql-core
+#     make validated-drop-native           # modern (glibc 2.34)
+#     ./scripts/deploy.sh --git fractalsql-valkey
 #
-# Build:   make
-# Install: sudo make install
-# Load:    valkey-cli MODULE LOAD /usr/lib/valkey/modules/fractalsql.so
-#          (or add `loadmodule ...` to valkey.conf)
+# Build the module:
+#     make                                  # picks the modern -c.a by default
+#     make CORE_VARIANT=community-sovereign-c-musl   # musl build
+#
+# Install + load:
+#     sudo make install
+#     valkey-cli MODULE LOAD /usr/lib/valkey/modules/fractalsql.so
 
 CC ?= gcc
 
-# Default to Valkey's 8.1 branch — current stable. Override to pin a
-# different release line. Valkey's redismodule.h is a thin compat
-# shim that `#include "valkeymodule.h"`, so both headers have to
-# land in include/ before src/module.c will compile. We keep
-# `#include "redismodule.h"` in the source so it stays byte-identical
-# to redis-fractalsql.
-VALKEY_HEADER_BASE ?= https://raw.githubusercontent.com/valkey-io/valkey/8.1/src
+# Vendored core archive selector. Default is the modern glibc-2.34
+# build dropped by `make validated-drop-native` in core. Override to
+# `community-sovereign-c-musl` for Alpine / musl hosts. glibc 2.34 is the
+# floor; there is no glibc 2.28 variant.
+CORE_VARIANT ?= community-sovereign-c
+# v1.2 platform layout: link the per-platform subdir
+# include/<os>-<arch>/ (os = uname -s lower-cased, arch = uname -m, which
+# is x86_64/aarch64 on Linux and arm64 on Apple Silicon — no translation).
+# Falls back to the flat include/ layout during the dual-write window so
+# this builds whether or not the subdir has been deployed yet; when core
+# drops the flat layout (v1.3) the fallback resolves to the subdir.
+FSQL_PLATFORM := $(shell uname -s | tr '[:upper:]' '[:lower:]')-$(shell uname -m)
+CORE_ARCHIVE  := $(firstword \
+    $(wildcard include/$(FSQL_PLATFORM)/libfractalsql-$(CORE_VARIANT).a) \
+    include/libfractalsql-$(CORE_VARIANT).a)
 
-# LuaJIT discovery
-LUAJIT_CFLAGS := $(shell pkg-config --cflags luajit 2>/dev/null)
-LUAJIT_LIBS   := $(shell pkg-config --libs luajit 2>/dev/null)
-ifeq ($(strip $(LUAJIT_CFLAGS)),)
-  LUAJIT_CFLAGS := -I/usr/include/luajit-2.1
-  LUAJIT_LIBS   := -lluajit-5.1
+CFLAGS  = -Wall -Wextra -O3 -flto -fPIC -Iinclude
+# One version, in ./VERSION. `override` so it survives a command-line CFLAGS
+# (build_test.sh passes its own for sanitizer builds).
+FSQL_VERSION := $(strip $(shell cat VERSION))
+override CFLAGS += -DFRACTALSQL_VERSION=\"$(FSQL_VERSION)\"
+# Keep the static core out of the server's symbol table. GNU ld spells that
+# --exclude-libs; Apple's ld takes an explicit export list instead.
+# (The Darwin branch has not been run yet -- there is no macOS host here.)
+ifeq ($(shell uname -s),Darwin)
+LDFLAGS = -dynamiclib -undefined dynamic_lookup -Wl,-exported_symbol,_RedisModule_OnLoad -lm -lpthread
+else
+LDFLAGS = -shared -flto -Wl,--exclude-libs,ALL -lm -ldl -lpthread
 endif
 
-CFLAGS  = -Wall -Wextra -O3 -flto -fPIC $(LUAJIT_CFLAGS) -Iinclude
-LDFLAGS = -shared -flto $(LUAJIT_LIBS) -lm -ldl -lpthread
-
 TARGET = fractalsql.so
-SRCS   = src/module.c
+SRCS   = src/module.c src/fv_pool.c src/fv_search.c src/fv_vector.c src/fv_analytics.c src/fv_daemon.c src/fv_agents.c src/fv_session.c src/fv_oom.c
 OBJS   = $(SRCS:.c=.o)
 
-# Default Valkey module dir.
+# Default Valkey module dir on Debian / Ubuntu / most distros.
 MODULE_DIR ?= /usr/lib/valkey/modules
 
-all: $(TARGET)
+all: verify-vendor $(TARGET)
 
-# Fetch module headers on demand if missing. redismodule.h is the
-# shim; valkeymodule.h carries the real API surface.
+# redismodule.h is vendored (include/redismodule.h, from the Redis 7.2 module
+# API, which Valkey 7.2/8.x keep source-compatible). It is never fetched at
+# build time: a moving URL with no checksum is a supply-chain hole.
 include/redismodule.h:
-	@echo "Fetching redismodule.h from $(VALKEY_HEADER_BASE)/redismodule.h"
-	@curl -fsSL "$(VALKEY_HEADER_BASE)/redismodule.h" -o $@
+	@echo "ERROR: include/redismodule.h is missing; restore it from git" >&2
+	@exit 1
 
-include/valkeymodule.h:
-	@echo "Fetching valkeymodule.h from $(VALKEY_HEADER_BASE)/valkeymodule.h"
-	@curl -fsSL "$(VALKEY_HEADER_BASE)/valkeymodule.h" -o $@
+# Verify the vendored core archive is present BEFORE compiling. Cheaper
+# to fail here than to surface as a confusing linker error.
+$(CORE_ARCHIVE):
+	@echo "ERROR: $(CORE_ARCHIVE) missing." >&2
+	@echo "  Refresh from foundry:" >&2
+	@echo "    cd ../fractalsql-core && make validated-drop-native && ./scripts/deploy.sh --git fractalsql-valkey" >&2
+	@exit 1
 
-$(TARGET): $(OBJS)
-	$(CC) -o $@ $^ $(LDFLAGS)
+# Static-link the core archive into the module. -Wl,--whole-archive is
+# NOT needed — the linker pulls in only the symbols module.c references
+# (fsql_init, fsql_new, fsql_search_ptr, fsql_last_error), keeping the
+# resulting .so close to the size of the .a's used .text.
 
-%.o: %.c include/sfs_core_bc.h include/redismodule.h include/valkeymodule.h
-	$(CC) $(CFLAGS) -c $< -o $@
+# Supply-chain verification (B5). The vendored archive is dropped
+# from fractalsql-core's deploy.sh together with `.artifacts.sha256`
+# (sha256sum of every shipped .h/.a/.so). Verify it matches the
+# bytes on disk before linking — catches a tampered .a in this
+# repo's include/ at build time, both in `make` and in CI.
+.PHONY: verify-vendor
+verify-vendor:
+	@if [ ! -f include/.artifacts.sha256 ]; then \
+		echo "ERROR: include/.artifacts.sha256 missing — re-deploy from core" >&2; \
+		echo "  cd ../fractalsql-core && make validated-drop-native && ./scripts/deploy.sh --git fractalsql-valkey" >&2; \
+		exit 1; \
+	fi
+	@cd include && sha256sum --quiet --check .artifacts.sha256 || { \
+		echo "ERROR: vendored artifact checksum mismatch in include/." >&2; \
+		echo "  Possible causes: tampered .a/.so, partial deploy, or stale .sha256." >&2; \
+		echo "  Re-deploy from core to recover." >&2; \
+		exit 1; \
+	}
+
+$(TARGET): $(OBJS) $(CORE_ARCHIVE) verify-vendor
+	$(CC) -o $@ $(OBJS) $(CORE_ARCHIVE) $(LDFLAGS)
+
+# -MMD writes src/*.d so a changed project header (fv_common.h) rebuilds every object that includes it; without
+# that, objects built against an older struct layout link into a module that crashes at run time. VERSION is a
+# prerequisite too: it is baked into the objects with -DFRACTALSQL_VERSION, so a bump must rebuild them.
+%.o: %.c include/fractalsql.h include/redismodule.h VERSION
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(OBJS:.o=.d)
 
 clean:
-	rm -f $(OBJS) $(TARGET)
-	@# Note: include/*module.h is deliberately preserved across
-	@# clean — refetch with `make distclean` if you want a fresh pull.
+	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET)
+	@# include/redismodule.h is vendored and tracked: clean and distclean leave it alone.
 
 distclean: clean
-	rm -f include/redismodule.h include/valkeymodule.h
 
 install: $(TARGET)
 	install -Dm0755 $(TARGET) $(MODULE_DIR)/fractalsql.so
 
-.PHONY: all clean distclean install
+.PHONY: all clean distclean install verify-vendor

@@ -1,0 +1,260 @@
+/* src/fractalsql_session.h
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
+ *
+ * Connection-scoped fsql_ctx registry (Diversify/search) plus the
+ * per-tier LLM context singletons (reason/embed/t2s/review), for
+ * fractalsql.
+ *
+ * WHY THIS EXISTS: every UDF body runs inside the fractalsqld daemon,
+ * one shared multithreaded process serving every connection's
+ * forwarded calls, so a plain file-static there would silently leak
+ * state (Diversify tuning, rolling D_q/overhead stats, ...) across
+ * unrelated sessions, with one connection's settings applying to
+ * another's query results. This registry gives that kind of state a
+ * safe, connection-scoped home.
+ *
+ * KEYING: the host database UDFs have no ambient access to a connection/THD
+ * handle through the public UDF ABI (UDF_INIT/UDF_ARGS). There is no
+ * portable way for a bare UDF to ask "what connection am I on" without
+ * linking against server-internal headers, which this repo deliberately
+ * does not do (see build.sh / Makefile, built purely against
+ * a database client header). So callers pass their own session
+ * key explicitly as a BIGINT UDF argument; the documented convention
+ * (sql/install_udf.sql) is to pass CONNECTION_ID().
+ *
+ * LIFETIME / KNOWN LIMITATION: the host database UDFs also have no on-disconnect
+ * hook, so entries can't be reaped exactly when a session ends. This
+ * registry bounds the damage with a hard capacity cap plus
+ * least-recently-used eviction of unreferenced entries, and an
+ * idle-TTL sweep (see fractalsql_session.c). Residual risk: the host database can
+ * reuse CONNECTION_ID() values over the server's lifetime under
+ * sustained connection churn; a brand-new connection that happens to be
+ * assigned a not-yet-evicted stale CONNECTION_ID() would inherit that
+ * old session's Diversify state until it next calls
+ * fractal_diversify_enable/set_params itself. The idle TTL bounds the
+ * exposure window, but does not eliminate it. This is a documented
+ * tradeoff, not an oversight.
+ *
+ * THREAD SAFETY: every function here is safe to call concurrently from
+ * different threads on different session_ids. A single session_id is
+ * only ever touched by one thread at a time in practice (the host database
+ * serializes statement execution per connection), but the registry does
+ * not assume that: entries are refcounted, so a concurrent eviction
+ * sweep can never free a ctx a caller is actively holding, even under a
+ * misused/shared session_id. For the search ctx specifically, where a
+ * second thread would race the core itself rather than just the
+ * registry's bookkeeping, both acquire paths refuse up front instead of
+ * racing: the exclusive acquire variant fails against a second
+ * concurrent exclusive acquire (see fractal_session_acquire_exclusive),
+ * and the plain acquire fails with NULL if the entry is currently held
+ * exclusively (an in-flight search), since a tuning/read call mutating
+ * or reading the same ctx's Diversify state while a search is using it
+ * would race the core just the same.
+ */
+#ifndef FRACTALSQL_SESSION_H
+#define FRACTALSQL_SESSION_H
+
+#include <stdbool.h>
+
+#include "fractalsql_sql.h"   /* fsql_ctx */
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Look up session_id's persistent ctx, creating one (via
+ * fsql_new_sovereign(NULL, NULL), not fsql_new_minimal, since Diversify
+ * calls like fsql_diversify_enable assert ctx->is_sovereign and fail
+ * on a minimal-tier ctx) if it doesn't exist yet.
+ * Increments the entry's refcount and marks it most-recently-used;
+ * caller MUST call fractal_session_release(session_id) exactly once
+ * when done, including on every error path, even though the fsql_ctx
+ * itself is NOT freed by release (only eviction/close frees it).
+ * Returns NULL on OOM, or if the registry is at capacity with every
+ * existing entry currently pinned (refcount > 0). That cap is an
+ * administrative limit, not expected to be hit in normal operation.
+ * Also returns NULL if session_id's entry is currently held by
+ * fractal_session_acquire_exclusive (an in-flight search) -- see this
+ * header's THREAD SAFETY note above. */
+fsql_ctx *fractal_session_acquire(unsigned long long session_id);
+
+/* Per-TIER singletons, not per-session slots: fractal_reason() and
+ * fractal_embed() each dispatch through one process-wide, per-tier
+ * shared ctx in fractalsql_session.c (g_tier_ctx[] under FSQL_TIER_
+ * REASON / FSQL_TIER_EMBED), kept distinct from each other and from
+ * the Diversify/search ctx fractal_session_acquire returns, because
+ * fsql_load_reasoning() replaces whatever reasoning VFS is already
+ * attached and the two tiers load with different HTTP config. The
+ * session_id argument is kept for signature stability and is ignored.
+ * *out_loaded (may be NULL) is set to whether a reasoning plugin has
+ * already been loaded into this tier's ctx, so the caller can skip
+ * re-loading it on every call; use fractal_session_mark_reason_loaded /
+ * _embed_loaded to flip it true after a successful load, and
+ * fractal_session_forget_*_loaded to clear it again on a provider
+ * reload. Caller MUST call fractal_session_release_tier exactly once
+ * when done -- NOT fractal_session_release: the tier ctx is a
+ * process-wide singleton that no release ever frees, so a tier call has
+ * no reference to give back. See the note on
+ * fractal_session_release_tier below. */
+fsql_ctx *fractal_session_acquire_reason(unsigned long long session_id, bool *out_loaded);
+fsql_ctx *fractal_session_acquire_embed(unsigned long long session_id, bool *out_loaded);
+
+/* Same contract again, for fractal_t2s_generate()'s GENERATE-step ctx:
+ * the T2S tier's own per-tier singleton, not shared with the reason or
+ * embed tiers, because it loads with RESPONSE_MODE=code and a
+ * text-to-sql-specific SYSTEM_TAG (see src/fractalsql_textsql.c),
+ * which would otherwise stomp the reason tier's plain-chat config or
+ * vice versa, the same reasoning as reason vs embed above. */
+fsql_ctx *fractal_session_acquire_t2s(unsigned long long session_id, bool *out_loaded);
+
+/* Same contract again, for fractal_t2s_review()'s ctx: the REVIEW
+ * tier's own per-tier singleton. RESPONSE_MODE is read once at
+ * plugin-load time and baked into a ctx for its whole lifetime (no
+ * per-dispatch override in the reasoning-http plugin's ABI), so if
+ * review shared the reason tier's ctx, an operator setting
+ * FSQL_REASONING_HTTP_RESPONSE_MODE=json/code for fractal_reason()
+ * would silently break review's hardcoded PASS/FAIL text parsing too.
+ * The review tier always loads with RESPONSE_MODE unset (see
+ * apply_review_env_locked, src/fractalsql_textsql.c), independent of
+ * whatever the reason tier's ctx is configured with. */
+fsql_ctx *fractal_session_acquire_review(unsigned long long session_id, bool *out_loaded);
+
+/* Exclusive-use acquire of session_id's Diversify/search ctx, for
+ * fractal_search()/fractal_search_explore() only. Same contract as
+ * fractal_session_acquire plus a per-entry busy pin: a second concurrent
+ * exclusive acquire of the SAME session_id fails with *out_busy = true
+ * (and NULL) instead of handing out the same ctx to two threads, since
+ * the core's search entry point is not safe for concurrent use on one
+ * ctx (the host database serializes statements per connection, but a caller is
+ * free to pass another connection's session_id, so this cannot be
+ * assumed). Busy entries are treated as pinned by the idle sweep, LRU
+ * eviction, and registry_close, exactly like refcounted ones.
+ *
+ * The exclusion is TWO-WAY, and it has to be: the plain acquire
+ * refuses while an exclusive holder has the entry pinned, and the
+ * exclusive acquire refuses while a plain holder has it. One direction
+ * was not enough -- a diversify tuning call (the plain acquire) and a
+ * search (the exclusive acquire) touch the SAME ctx, and the core's
+ * search entry point is not safe for concurrent use on one ctx, so
+ * whichever came second had to wait or fail. A plain holder in flight
+ * therefore fails the exclusive acquire with *out_busy = true, exactly
+ * as a second exclusive holder does.
+ *
+ * Release with fractal_session_release_exclusive exactly once, on every
+ * path, same discipline as the plain acquire/release pair. */
+fsql_ctx *fractal_session_acquire_exclusive(unsigned long long session_id,
+                                            bool *out_busy);
+
+/* Release an exclusive acquire (fractal_session_acquire_exclusive):
+ * clears the busy pin and drops the refcount atomically. Safe to call
+ * on an id with no live entry (no-op, defensive only). */
+void fractal_session_release_exclusive(unsigned long long session_id);
+
+/* Mark a tier's ctx as having a reasoning plugin successfully attached
+ * (the tier flag fractal_session_acquire_reason/_embed/_t2s/_review
+ * report through *out_loaded). session_id is ignored: these are
+ * tier-wide, not per-session. */
+void fractal_session_mark_reason_loaded(unsigned long long session_id);
+void fractal_session_mark_embed_loaded(unsigned long long session_id);
+void fractal_session_mark_t2s_loaded(unsigned long long session_id);
+void fractal_session_mark_review_loaded(unsigned long long session_id);
+
+/* Provider-reload hooks (see fractalsql_provider.h, src/): the daemon's
+ * apply_provider entry points call these AFTER swapping the effective
+ * provider settings, so the next dispatch in the affected tier re-runs
+ * its setenv+fsql_load_reasoning sequence against the new settings
+ * instead of reusing a plugin loaded from the old ones. For each LLM
+ * tier the daemon clears exactly the tiers whose settings its apply
+ * touched (cognition: reason+embed; textsql: t2s+review; enterprise: the
+ * lib flag under its own lock). Tier contexts themselves are kept; only
+ * the loaded bookkeeping is cleared. */
+void fractal_session_forget_reason_loaded(void);
+void fractal_session_forget_embed_loaded(void);
+void fractal_session_forget_t2s_loaded(void);
+void fractal_session_forget_review_loaded(void);
+
+/* Per-session opt-in for the partial-result mode. The
+ * set path goes through fractal_agent_partial_fail()'s UDF triad in
+ * src/fractalsql.c (a session-scoped administrative write, like
+ * fractal_diversify_enable; the MCP server opts every one of its
+ * sessions in at connect, so the flag rides an ordinary registry
+ * entry). get() is a read-only lookup: it creates nothing, and an
+ * unknown session_id simply reads as off -- a UDF dispatching reason
+ * calls must never pay an entry-creation cost just to check a flag,
+ * and a session that never opted in gets the documented default
+ * (raise) behavior. */
+void fractal_session_set_agent_partial(unsigned long long session_id, bool on);
+bool fractal_session_get_agent_partial(unsigned long long session_id);
+
+/* Whether the session's DIVERSIFY monitor is enabled.
+ *
+ * WHY THIS IS TRACKED HERE AND NOT ASKED OF THE CORE: the core's ABI
+ * has no "is the monitor on?" query. fsql_diversify_get_params
+ * returns the tunables whether or not the monitor is running, so
+ * deriving the answer from it reports "enabled" for a session that
+ * never called fractal_diversify_enable. The state is therefore recorded where the only calls that
+ * change it live (fractal_diversify_enable / _disable), and read back
+ * by the diagnostics.
+ *
+ * The flag lives on the same registry entry as the ctx it describes,
+ * so it is dropped exactly when that ctx is: when the entry is
+ * evicted, closed or swept, the ctx it belonged to goes with it, and
+ * a session that comes back has a fresh ctx with the monitor off --
+ * which is what the flag then says. */
+void fractal_session_set_diversify_enabled(unsigned long long session_id, bool on);
+bool fractal_session_get_diversify_enabled(unsigned long long session_id);
+
+/* Release a reference obtained from fractal_session_acquire. Safe to
+ * call on an id with no live entry (no-op, defensive only, should not
+ * happen given correct acquire/release pairing). */
+void fractal_session_release(unsigned long long session_id);
+
+/* The release that pairs with the per-TIER acquires above
+ * (fractal_session_acquire_reason/_embed/_t2s/_review). It is a NO-OP,
+ * and that is the point.
+ *
+ * WHY IT IS NOT fractal_session_release: the tier acquires hand out a
+ * process-wide per-tier singleton and take NO reference on the
+ * per-session entry -- the session_id argument is documented as
+ * ignored. Releasing them with fractal_session_release(session_id)
+ * therefore DROPPED a refcount that had never been incremented: the
+ * session's own Diversify/search entry lost a count it was still
+ * holding, and a concurrent registry_close or LRU eviction could then
+ * free that ctx while another connection was still executing on it.
+ * The guard inside release (never below zero) hid the imbalance
+ * rather than fixing it.
+ *
+ * Keep the pairing: a tier acquire ends with a
+ * fractal_session_release_tier(), a plain acquire with a
+ * fractal_session_release(). */
+void fractal_session_release_tier(void);
+
+/* Explicitly drop session_id's entry, freeing its ctx immediately if
+ * nothing currently holds a reference to it (refcount == 0). If the
+ * entry is currently pinned, this is a deliberate no-op: the still-
+ * holding caller's release() plus the next idle-TTL sweep reclaim it
+ * instead; this function never frees memory a live pointer references.
+ * Safe to call on an id with no entry (no-op).
+ *
+ * Named _registry_close (not _close) to avoid colliding with the SQL
+ * UDF entry point fractal_session_close() in src/fractalsql.c, which
+ * the host database's dynamic loader requires to be named EXACTLY the SQL
+ * function name; that UDF is a thin wrapper calling this. */
+void fractal_session_registry_close(unsigned long long session_id);
+
+/* One-way latch on a session id: once locked, the destructive ledger UDFs
+ * (flush / compact / reset_soft / reset_hard) refuse for that id. Nothing
+ * clears it for the life of the process. Kept in its own small table, NOT in
+ * the session entry, so an LRU eviction of the entry cannot drop the latch
+ * (fail-open). Keyed by the session id the CALLER passes, so it covers calls
+ * that use the locked id (the MCP server's own connection id) and nothing else. */
+void fractal_session_lock_destructive(unsigned long long session_id);
+bool fractal_session_destructive_locked(unsigned long long session_id);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* FRACTALSQL_SESSION_H */

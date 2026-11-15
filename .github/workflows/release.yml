@@ -1,4 +1,4 @@
-name: Release valkey-fractalsql Packages
+name: Release fractalsql-valkey Packages
 
 on:
   push:
@@ -9,8 +9,14 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Least privilege: read-only by default; only the two jobs that publish to
+# the GitHub Release (package, build-macos) are granted write below.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -21,7 +27,7 @@ jobs:
   #
   # amd64 gets a native smoke test that loads the SAME .so into
   # valkey/valkey:7.2, :8.0, and :8.1 containers and verifies
-  # FRACTALSQL.EDITION / FRACTALSQL.VERSION plus a cosine-similarity
+  # FRACTAL.EDITION / FRACTAL.VERSION plus a cosine-similarity
   # convergence check — one binary, every major, which is the actual
   # cross-major-ABI proof.
   #
@@ -31,32 +37,67 @@ jobs:
   # ------------------------------------------------------------------
   build:
     name: build ${{ matrix.arch }}
-    runs-on: ubuntu-latest
+    # Native arm64 via GitHub's ubuntu-24.04-arm runner. Earlier
+    # iterations used ubuntu-latest + QEMU, which paid the cost of
+    # x86->aarch64 instruction translation for the entire LuaJIT +
+    # module build. Native arm64 runners (GA mid-2025) run the same
+    # Docker + buildx stack at native speed; no QEMU shim needed.
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            profile: modern
+            runner: ubuntu-24.04
+          - arch: amd64
+            profile: musl
+            runner: ubuntu-24.04
+          - arch: arm64
+            profile: modern
+            runner: ubuntu-24.04-arm
+          - arch: arm64
+            profile: musl
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: linux/amd64,linux/arm64
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
-      - name: Build fractalsql.so for ${{ matrix.arch }}
+      - name: Compute suffix (modern=empty, musl="-musl")
+        id: suffix
+        run: |
+          case "${{ matrix.profile }}" in
+            musl)   echo "bin=-musl"   >> "$GITHUB_OUTPUT" ;;
+            *)      echo "bin="        >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Build fractalsql.so (${{ matrix.profile }}) for ${{ matrix.arch }}
         run: |
           chmod +x build.sh
-          ./build.sh ${{ matrix.arch }}
-          ls -l dist/${{ matrix.arch }}/fractalsql.so
+          ./build.sh ${{ matrix.arch }} --profile=${{ matrix.profile }}
+          ls -l dist/${{ matrix.arch }}/fractalsql${{ steps.suffix.outputs.bin }}.so
+          ls -l dist/${{ matrix.arch }}/fractalsql-valkey-mcp${{ steps.suffix.outputs.bin }}
+
+      - name: Smoke-check fractalsql-valkey-mcp (modern amd64, runs natively on the runner)
+        if: matrix.arch == 'amd64' && matrix.profile != 'musl'
+        run: |
+          set -euo pipefail
+          MCP="dist/amd64/fractalsql-valkey-mcp"
+          "${MCP}" --version
+          "${MCP}" --list-tools | head -5
+          test "$("${MCP}" --list-tools | wc -l)" -ge 69
 
       - name: Smoke test (edition/version + FRACTAL.SEARCH convergence)
-        if: matrix.arch == 'amd64'
+        # Smoke test only on amd64/modern. The musl artifacts pass
+        # the same posture checks inside the Dockerfile (assert_so.sh)
+        # and the install-test workflow exercises rocky9 + alpine paths
+        # against fresh containers. Spinning valkey:X containers for
+        # all 4 cells would roughly double CI time for marginal coverage.
+        if: matrix.arch == 'amd64' && matrix.profile == 'modern'
         run: |
           set -euo pipefail
           SO="$(pwd)/dist/amd64/fractalsql.so"
@@ -98,13 +139,13 @@ jobs:
               docker exec "${C}" valkey-cli MODULE LIST | tee /tmp/mods
               grep -q fractalsql /tmp/mods
 
-              EDITION=$(docker exec "${C}" valkey-cli FRACTALSQL.EDITION)
+              EDITION=$(docker exec "${C}" valkey-cli FRACTAL.EDITION)
               echo "[${TAG}] edition: ${EDITION}"
               test "${EDITION}" = "Community"
 
-              VERSION=$(docker exec "${C}" valkey-cli FRACTALSQL.VERSION)
+              VERSION=$(docker exec "${C}" valkey-cli FRACTAL.VERSION)
               echo "[${TAG}] version: ${VERSION}"
-              test "${VERSION}" = "1.0.0"
+              test "${VERSION}" = "2.0.0"
 
               # Convergence check. query = (0.6, 0.8). Cosine distance
               # is magnitude-invariant — every point on the ray through
@@ -128,10 +169,19 @@ jobs:
           echo "smoke test passed on valkey 7.2 / 8.0 / 8.1"
 
       - name: Upload .so artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: valkey-fractalsql-${{ matrix.arch }}-so
-          path: dist/${{ matrix.arch }}/fractalsql.so
+          name: fractalsql-valkey-${{ matrix.arch }}-${{ matrix.profile }}-so
+          path: |
+            dist/${{ matrix.arch }}/fractalsql${{ steps.suffix.outputs.bin }}.so
+            dist/${{ matrix.arch }}/fractalsql-valkey-mcp${{ steps.suffix.outputs.bin }}
+          if-no-files-found: error
+
+      - name: Upload fractalsqld artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsqld-${{ matrix.arch }}-${{ matrix.profile }}
+          path: dist/${{ matrix.arch }}/fractalsqld${{ steps.suffix.outputs.bin }}
           if-no-files-found: error
 
   # ------------------------------------------------------------------
@@ -140,22 +190,42 @@ jobs:
   # verifies no luajit runtime dep leaked into the package metadata.
   # ------------------------------------------------------------------
   package:
-    name: package ${{ matrix.arch }}
+    name: package ${{ matrix.arch }} / ${{ matrix.profile }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        include:
+          - { arch: amd64, profile: modern }
+          - { arch: amd64, profile: musl }
+          - { arch: arm64, profile: modern }
+          - { arch: arm64, profile: musl }
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Compute suffix (modern=empty, musl="-musl")
+        id: suffix
+        run: |
+          case "${{ matrix.profile }}" in
+            musl)   echo "bin=-musl"   >> "$GITHUB_OUTPUT" ;;
+            *)      echo "bin="        >> "$GITHUB_OUTPUT" ;;
+          esac
 
       - name: Download fractalsql.so
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
         with:
-          name: valkey-fractalsql-${{ matrix.arch }}-so
+          name: fractalsql-valkey-${{ matrix.arch }}-${{ matrix.profile }}-so
+          path: dist/${{ matrix.arch }}
+
+      - name: Download fractalsqld
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: fractalsqld-${{ matrix.arch }}-${{ matrix.profile }}
           path: dist/${{ matrix.arch }}
 
       - name: Install Packaging Tools
@@ -164,13 +234,18 @@ jobs:
           sudo apt-get install -y ruby ruby-dev build-essential rpm
           sudo gem install --no-document fpm
 
-      - name: Build .deb and .rpm for ${{ matrix.arch }}
+      - name: Build packages (${{ matrix.profile }}) for ${{ matrix.arch }}
+        # modern → .deb + .rpm
+        # musl   → .apk only
+        env:
+          PROFILE: ${{ matrix.profile }}
         run: |
           chmod +x scripts/package.sh
           scripts/package.sh ${{ matrix.arch }}
           ls -l dist/packages
 
       - name: Verify packages declare no luajit dependency
+        if: matrix.profile != 'musl'
         run: |
           set -euo pipefail
           for deb in dist/packages/*-${{ matrix.arch }}.deb; do
@@ -194,33 +269,336 @@ jobs:
           done
 
       - name: Verify packages ship LICENSE files
+        if: matrix.profile != 'musl'
         run: |
           set -euo pipefail
-          for deb in dist/packages/*-${{ matrix.arch }}.deb; do
+          for deb in dist/packages/fractalsql-valkey-${{ matrix.arch }}.deb; do
               echo "=== ${deb} ==="
               CONTENTS=$(dpkg-deb -c "${deb}")
-              echo "${CONTENTS}" | grep -E 'usr/share/doc/valkey-fractalsql/LICENSE$'
-              echo "${CONTENTS}" | grep -E 'usr/share/doc/valkey-fractalsql/LICENSE-THIRD-PARTY$'
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/fractalsql-valkey/LICENSE$'
+              echo "${CONTENTS}" | grep -E 'usr/share/doc/fractalsql-valkey/LICENSE-THIRD-PARTY$'
           done
-          for rpm in dist/packages/*-${{ matrix.arch }}.rpm; do
+          for rpm in dist/packages/fractalsql-valkey-${{ matrix.arch }}.rpm; do
               echo "=== ${rpm} ==="
               CONTENTS=$(rpm -qlp "${rpm}")
-              echo "${CONTENTS}" | grep -E '/usr/share/doc/valkey-fractalsql/LICENSE$'
-              echo "${CONTENTS}" | grep -E '/usr/share/doc/valkey-fractalsql/LICENSE-THIRD-PARTY$'
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/fractalsql-valkey/LICENSE$'
+              echo "${CONTENTS}" | grep -E '/usr/share/doc/fractalsql-valkey/LICENSE-THIRD-PARTY$'
           done
 
+      - name: Verify module .so lands at the right per-distro path
+        if: matrix.profile != 'musl'
+        run: |
+          # Valkey modules load via `loadmodule <absolute-path>` in
+          # valkey.conf, so the install path is technically arbitrary —
+          # but we follow each distro's convention so RHEL admins aren't
+          # surprised and our shipped .conf matches reality.
+          #   Debian:  /usr/lib/valkey/modules/
+          #   RHEL:    /usr/lib64/valkey/modules/
+          # The bundled fractalsql.conf's `loadmodule` line must also
+          # point at the correct per-distro path.
+          set -euo pipefail
+          for deb in dist/packages/fractalsql-valkey-${{ matrix.arch }}.deb; do
+              echo "=== ${deb} ==="
+              dpkg-deb -c "${deb}" \
+                  | grep -E 'usr/lib/valkey/modules/fractalsql\.so$'
+              dpkg-deb --fsys-tarfile "${deb}" \
+                  | tar -xOf - ./etc/valkey/modules-available/fractalsql.conf \
+                  | grep -E '^loadmodule /usr/lib/valkey/modules/fractalsql\.so$'
+          done
+          for rpm in dist/packages/fractalsql-valkey-${{ matrix.arch }}.rpm; do
+              echo "=== ${rpm} ==="
+              rpm -qlp "${rpm}" \
+                  | grep -E '/usr/lib64/valkey/modules/fractalsql\.so$'
+              rpm2cpio "${rpm}" \
+                  | cpio -i --to-stdout ./etc/valkey/modules-available/fractalsql.conf 2>/dev/null \
+                  | grep -E '^loadmodule /usr/lib64/valkey/modules/fractalsql\.so$'
+          done
+
+      - name: Verify the module packages carry only glibc and Valkey
+        if: matrix.profile != 'musl'
+        run: |
+          set -euo pipefail
+          deb="dist/packages/fractalsql-valkey-${{ matrix.arch }}.deb"
+          rpm="dist/packages/fractalsql-valkey-${{ matrix.arch }}.rpm"
+          DEPS=$(dpkg-deb -f "${deb}" Depends)
+          echo "deb Depends: ${DEPS}"
+          if echo "${DEPS}" | grep -iE 'libssl|libcurl|openssl'; then echo "FAIL: the module package depends on OpenSSL or libcurl" >&2; exit 1; fi
+          REQS=$(rpm -qpR "${rpm}")
+          echo "rpm Requires: ${REQS}"
+          if echo "${REQS}" | grep -iE 'libssl|libcrypto|libcurl|openssl'; then echo "FAIL: the module rpm requires OpenSSL or libcurl" >&2; exit 1; fi
+          # The daemon, the plugin and the MCP server live in the fractalsqld-valkey package, not here.
+          if dpkg-deb -c "${deb}" | grep -E 'fractalsqld$|reasoning-http|fractalsql-valkey-mcp'; then echo "FAIL: the module package carries daemon-side files" >&2; exit 1; fi
+
+      - name: Verify the fractalsqld-valkey packages (daemon, signed plugin, MCP server)
+        if: matrix.profile != 'musl'
+        run: |
+          set -euo pipefail
+          deb="dist/packages/fractalsqld-valkey-${{ matrix.arch }}.deb"
+          rpm="dist/packages/fractalsqld-valkey-${{ matrix.arch }}.rpm"
+          echo "=== ${deb} ==="
+          dpkg-deb -c "${deb}" | grep -E 'usr/libexec/fractalsql/fractalsqld$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/lib/systemd/system/fractalsqld\.service$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/lib/fractalsql/fractalsql-reasoning-http\.so$'
+          # The plugin loads only with its detached signature beside it.
+          dpkg-deb -c "${deb}" | grep -E 'usr/lib/fractalsql/fractalsql-reasoning-http\.so\.sig$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/bin/fractalsql-valkey-mcp$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/bin/\.mcp-schema-lock$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/bin/\.mcp-safety-annotations-lock$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/share/doc/fractalsqld-valkey/mcp/manifest\.json$'
+          dpkg-deb -c "${deb}" | grep -E 'usr/share/doc/fractalsqld-valkey/mcp/RUN\.txt$'
+          dpkg-deb -f "${deb}" Depends | grep -E 'libcurl4' | grep -E 'libssl3'
+          dpkg-deb --fsys-tarfile "${deb}" | tar -xOf - ./usr/lib/fractalsql/fractalsql-reasoning-http.so.sig | wc -c | grep -qx 64
+          echo "=== ${rpm} ==="
+          rpm -qlp "${rpm}" | grep -E '/usr/libexec/fractalsql/fractalsqld$'
+          rpm -qlp "${rpm}" | grep -E '/usr/lib/systemd/system/fractalsqld\.service$'
+          rpm -qlp "${rpm}" | grep -E '/usr/lib64/fractalsql/fractalsql-reasoning-http\.so$'
+          rpm -qlp "${rpm}" | grep -E '/usr/lib64/fractalsql/fractalsql-reasoning-http\.so\.sig$'
+          rpm -qlp "${rpm}" | grep -E '/usr/bin/fractalsql-valkey-mcp$'
+          rpm -qlp "${rpm}" | grep -E '/usr/bin/\.mcp-schema-lock$'
+          rpm -qlp "${rpm}" | grep -E '/usr/share/doc/fractalsqld-valkey/mcp/RUN\.txt$'
+          rpm -qpR "${rpm}" | grep -E 'libcurl\.so\.4'
+          rpm -qpR "${rpm}" | grep -E 'libcrypto\.so\.3'
+
+      - name: Verify the musl .apk packages
+        if: matrix.profile == 'musl'
+        run: |
+          set -euo pipefail
+          # fpm's .apk tar headers are rejected by GNU tar, so the contents are listed with scripts/ci/apk_list.py
+          # (the install-test workflow installs the same packages in Alpine and checks them end to end).
+          APK="dist/packages/fractalsql-valkey-musl-${{ matrix.arch }}.apk"
+          DAPK="dist/packages/fractalsqld-valkey-musl-${{ matrix.arch }}.apk"
+          for f in "${APK}" "${DAPK}"; do test -f "${f}" || { echo "FAIL: ${f} missing" >&2; exit 1; }; done
+          echo "=== ${APK} ==="
+          MOD="$(python3 scripts/ci/apk_list.py "${APK}")"
+          echo "${MOD}"
+          echo "${MOD}" | grep -E '^usr/lib/valkey/modules/fractalsql\.so$'
+          echo "${MOD}" | grep -E '^etc/valkey/modules-available/fractalsql\.conf$'
+          # The module package depends on the Valkey server and nothing else, and carries none of the daemon-side files.
+          [ "$(echo "${MOD}" | grep -c '^depend:')" -eq 1 ] && echo "${MOD}" | grep -qx 'depend: valkey'
+          if echo "${MOD}" | grep -E 'fractalsql-valkey-mcp|reasoning-http|fractalsqld$'; then
+              echo "FAIL: the module .apk carries daemon-side files" >&2; exit 1
+          fi
+          echo "=== ${DAPK} ==="
+          DAE="$(python3 scripts/ci/apk_list.py "${DAPK}")"
+          echo "${DAE}"
+          echo "${DAE}" | grep -E '^usr/libexec/fractalsql/fractalsqld$'
+          echo "${DAE}" | grep -E '^etc/init\.d/fractalsqld$'
+          echo "${DAE}" | grep -E '^usr/lib/fractalsql/fractalsql-reasoning-http\.so$'
+          # The plugin loads only with its detached signature beside it.
+          echo "${DAE}" | grep -E '^usr/lib/fractalsql/fractalsql-reasoning-http\.so\.sig$'
+          echo "${DAE}" | grep -E '^usr/bin/fractalsql-valkey-mcp$'
+          echo "${DAE}" | grep -E '^usr/bin/\.mcp-schema-lock$'
+          echo "${DAE}" | grep -E '^usr/bin/\.mcp-safety-annotations-lock$'
+          echo "${DAE}" | grep -qx 'depend: libcurl'
+          echo "${DAE}" | grep -qx 'depend: libssl3'
+          echo "ok: musl .apk packages"
+
+      - name: Stage easy_install.sh (version stamped)
+        if: matrix.arch == 'amd64' && matrix.profile == 'modern'
+        run: |
+          set -euo pipefail
+          VER="$(tr -d '[:space:]' < VERSION)"
+          sed "0,/@@FSQL_VERSION@@/s//${VER}/" scripts/easy_install.sh > dist/packages/easy_install.sh
+          chmod +x dist/packages/easy_install.sh
+          bash -n dist/packages/easy_install.sh
+
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: valkey-fractalsql-${{ matrix.arch }}
+          name: fractalsql-valkey-${{ matrix.arch }}-${{ matrix.profile }}
           path: dist/packages/*
           if-no-files-found: error
 
       - name: Upload to Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           files: dist/packages/*
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ------------------------------------------------------------------
+  # macOS: fractalsql.dylib for Intel (macos-15-intel) + Apple Silicon
+  # (macos-15). Valkey modules load via `loadmodule <absolute-path>`
+  # so install path is user-chosen.
+  #
+  # Unsigned release: users run `xattr -d com.apple.quarantine` once
+  # after extraction. Code signing + notarization deferred.
+  # ------------------------------------------------------------------
+  build-macos:
+    name: macos ${{ matrix.platform_tag }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            platform_tag: osx_amd64
+          - runner: macos-15
+            platform_tag: osx_arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Build fractalsql.dylib
+        run: |
+          set -euo pipefail
+          # The Makefile's Darwin branch links include/darwin-<arch>/ and
+          # exports only RedisModule_OnLoad.
+          make
+          OUT_DIR="dist/${{ matrix.platform_tag }}"
+          mkdir -p "${OUT_DIR}"
+          cp fractalsql.so "${OUT_DIR}/fractalsql.dylib"
+          ls -l "${OUT_DIR}/fractalsql.dylib"
+
+      # The MCP server is plain C++17 and links only OpenSSL, so each runner builds its own architecture natively.
+      # OpenSSL is linked DYNAMICALLY against Homebrew's openssl@3, which Homebrew patches; none of it is shipped
+      # in the zip, and the user needs openssl@3 installed. Its keg-only prefix is passed explicitly (CPPEXTRA and
+      # LDEXTRA). -mmacosx-version-min=13.3 because Apple's libc++ marks std::to_chars on a double unavailable
+      # before that (the extension keeps its own 11.0).
+      - name: Build fractalsql-valkey-mcp
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          SSL="$(brew --prefix openssl@3)"
+          make -C mcp clean || true
+          make -C mcp CXXFLAGS="-O2 -mmacosx-version-min=13.3" CPPEXTRA="-I${SSL}/include" LDEXTRA="-L${SSL}/lib"
+          # OpenSSL must be linked as a shared library from Homebrew's openssl@3 (not folded in statically), and the
+          # binary must need nothing else outside the system.
+          LIBS="$(otool -L mcp/fractalsql-valkey-mcp | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically" >&2; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the MCP binary depends on a library other than openssl@3 and the system's own" >&2; exit 1
+          fi
+          mcp/fractalsql-valkey-mcp --version
+          mcp/fractalsql-valkey-mcp --list-tools | head -3
+          cp mcp/fractalsql-valkey-mcp "dist/${{ matrix.platform_tag }}/fractalsql-valkey-mcp"
+
+      - name: Posture checks (otool, size, exports)
+        run: |
+          set -euo pipefail
+          DYLIB="dist/${{ matrix.platform_tag }}/fractalsql.dylib"
+
+          echo "--- otool -L ---"
+          otool -L "${DYLIB}"
+          # otool -L lists the dylib's own install name first; it is not a dependency.
+          SELF=$(otool -D "${DYLIB}" | tail -n 1)
+          BAD=$(otool -L "${DYLIB}" \
+                  | tail -n +2 \
+                  | awk '{print $1}' \
+                  | grep -vxF "${SELF}" \
+                  | grep -vE '^(/usr/lib/libSystem\.B\.dylib|/usr/lib/libc\+\+\.1\.dylib|/usr/lib/libresolv\.[0-9]+\.dylib|/System/Library/Frameworks/)' \
+                  | grep -v '^$' || true)
+          if [ -n "${BAD}" ]; then
+              echo "FAIL: disallowed dynamic deps:" >&2
+              echo "${BAD}" >&2
+              exit 1
+          fi
+
+          echo "--- size ---"
+          SZ=$(stat -f '%z' "${DYLIB}")
+          echo "size: ${SZ} bytes"
+          if [ "${SZ}" -gt 3145728 ]; then
+              echo "FAIL: dylib exceeds 3 MiB ceiling" >&2
+              exit 1
+          fi
+
+          echo "--- required exports ---"
+          # Valkey modules still use RedisModule_OnLoad at the ABI
+          # level (REDISMODULE_APIVER_1 aliased as VALKEYMODULE_*).
+          nm -gU "${DYLIB}" | grep -E '_RedisModule_OnLoad$' \
+              || { echo "FAIL: RedisModule_OnLoad missing"; exit 1; }
+          echo "ok: ${DYLIB}"
+
+      - name: Package .zip
+        run: |
+          set -euo pipefail
+          DIST_DIR="dist/packages"
+          mkdir -p "${DIST_DIR}"
+          ZIP_NAME="fractalsql-valkey-${{ matrix.platform_tag }}.zip"
+          STAGE="$(mktemp -d)"
+          cp "dist/${{ matrix.platform_tag }}/fractalsql.dylib" "${STAGE}/"
+          cp LICENSE "${STAGE}/"
+          cp THIRD-PARTY-NOTICES.md "${STAGE}/LICENSE-THIRD-PARTY"
+          cp scripts/load_module.conf "${STAGE}/fractalsql.conf"
+          # MCP server: the executable and its two lock files sit together, which is where the server looks.
+          install -d "${STAGE}/mcp"
+          install -m 0755 "dist/${{ matrix.platform_tag }}/fractalsql-valkey-mcp" "${STAGE}/mcp/fractalsql-valkey-mcp"
+          install -m 0644 mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock mcp/README.md mcp/RUN.txt mcp/manifest.json "${STAGE}/mcp/"
+          cat > "${STAGE}/README.txt" <<EOF
+          fractalsql-valkey 2.0.0 Community (${{ matrix.platform_tag }})
+
+          This archive ships an UNSIGNED Valkey module for macOS.
+
+          1. Pick an install location:
+                 mkdir -p /opt/fractalsql-valkey
+                 cp fractalsql.dylib /opt/fractalsql-valkey/
+
+          2. Clear Gatekeeper quarantine:
+                 xattr -d com.apple.quarantine /opt/fractalsql-valkey/fractalsql.dylib
+
+          3. Add to valkey.conf (Homebrew default:
+             /opt/homebrew/etc/valkey.conf or /usr/local/etc/valkey.conf):
+                 loadmodule /opt/fractalsql-valkey/fractalsql.dylib
+
+          4. Restart valkey:
+                 brew services restart valkey
+
+          5. Verify:
+                 valkey-cli MODULE LIST
+                 valkey-cli FRACTAL.EDITION    # -> "Community"
+                 valkey-cli FRACTAL.VERSION    # -> "2.0.0"
+
+          The optional MCP server (mcp/fractalsql-valkey-mcp) is separate from the module:
+              xattr -d com.apple.quarantine mcp/fractalsql-valkey-mcp      # unsigned release
+              mcp/fractalsql-valkey-mcp --list-tools
+          It needs Homebrew's openssl@3 (brew install openssl@3); the module itself does not use OpenSSL.
+          How to start the server: mcp/RUN.txt. All settings: mcp/README.md.
+          EOF
+          ( cd "${STAGE}" && zip -9 -r "${OLDPWD}/${DIST_DIR}/${ZIP_NAME}" . > /dev/null )
+          rm -rf "${STAGE}"
+          ls -l "${DIST_DIR}/${ZIP_NAME}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: fractalsql-valkey-${{ matrix.platform_tag }}
+          path: dist/packages/fractalsql-valkey-${{ matrix.platform_tag }}.zip
+          if-no-files-found: error
+
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          files: dist/packages/fractalsql-valkey-${{ matrix.platform_tag }}.zip
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Publishes SHA256SUMS for every asset on the release. scripts/easy_install.sh refuses to install a
+  # download whose checksum does not match this file.
+  checksums:
+    needs: [package, build-macos]
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Compute and upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir assets && cd assets
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*' --skip-existing
+          rm -f SHA256SUMS
+          sha256sum * | sort -k2 > ../SHA256SUMS
+          cd ..
+          gh release upload "$TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber

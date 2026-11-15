@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
+[Unit]
+Description=FractalSQL daemon (fractalsqld)
+Documentation=https://github.com/FractalSQLabs/fractalsql-valkey
+After=network.target
+Before=valkey-server.service valkey.service
+
+[Service]
+Type=simple
+# Optional (leading '-': no failure if absent). Reasoning and embedding settings
+# live in fractalsqld.conf (the preferred source, reloadable without a restart);
+# this file is the environment fallback for keys the conf omits, such as
+# FSQL_REASONING_HTTP_RESPONSE_MODE.
+EnvironmentFile=-/etc/fractalsql/fractalsqld.env
+ExecStart=/usr/libexec/fractalsql/fractalsqld -c /etc/fractalsql/fractalsqld.conf
+User=fractalsql
+Group=fractalsql
+RuntimeDirectory=fractalsql
+RuntimeDirectoryMode=0750
+# StateDirectory creates and owns /var/lib/fractalsql (writable even under
+# ProtectSystem=strict) and WorkingDirectory starts the daemon there, so the
+# enterprise ledger's relative default path lands somewhere persistent and
+# writable instead of wherever systemd would otherwise start the process.
+StateDirectory=fractalsql
+WorkingDirectory=/var/lib/fractalsql
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

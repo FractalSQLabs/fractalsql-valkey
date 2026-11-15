@@ -1,0 +1,395 @@
+name: Install test (packaging)
+
+# End-to-end validation of the shipped .deb and .rpm packages.
+# Uses ubuntu:25.04 on the Debian side because valkey-server first
+# shipped in the Ubuntu repos with 24.10 (oracular); 24.04 predates
+# it. On the RHEL side, valkey is in EPEL 9 since late 2024.
+
+on:
+  push:
+    branches: [main, '2.x']
+  pull_request:
+    branches: [main, '2.x']
+  workflow_dispatch: {}
+  schedule:
+    - cron: '29 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-artifacts:
+    name: Build .so + .deb + .rpm (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
+      - name: Build fractalsql.so
+        run: |
+          chmod +x build.sh
+          ./build.sh amd64
+      - name: Install fpm
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev build-essential rpm
+          sudo gem install --no-document fpm
+      - name: Package .deb and .rpm (modern)
+        run: |
+          chmod +x scripts/package.sh
+          scripts/package.sh amd64
+
+      # Musl profile (Alpine 3.20 / musl 1.2). Built unconditionally
+      # so the apk-install job below has a .apk to test against.
+      - name: Build fractalsql.so (musl profile)
+        run: PROFILE=musl ./build.sh amd64
+      - name: Package .apk (musl)
+        run: PROFILE=musl scripts/package.sh amd64
+
+      - run: ls -l dist/packages
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages/*
+          retention-days: 1
+          if-no-files-found: error
+
+  debian-install:
+    name: Debian — install + MODULE LOAD
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in ubuntu:25.04 with valkey-server
+        run: |
+          cat > test-deb.sh <<'SCRIPT'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -qq -y valkey-server valkey-tools
+
+          apt-get install -qq -y ./dist/packages/fractalsql-valkey-amd64.deb
+
+          # Verify module + conf landed per Debian convention.
+          test -f /usr/lib/valkey/modules/fractalsql.so
+          grep -E '^loadmodule /usr/lib/valkey/modules/fractalsql\.so$' \
+              /etc/valkey/modules-available/fractalsql.conf
+
+          valkey-server --daemonize yes \
+              --loadmodule /usr/lib/valkey/modules/fractalsql.so
+
+          for i in $(seq 1 30); do
+              valkey-cli ping >/dev/null 2>&1 && break
+              sleep 1
+          done
+          valkey-cli ping
+
+          valkey-cli MODULE LIST | grep -i fractal
+
+          # python3 for tests/smoke.sh's binary-blob marshalling.
+          apt-get install -qy python3
+
+          VALKEY_CLI=valkey-cli bash /work/tests/smoke.sh
+
+          echo "ok: Debian install + MODULE LOAD + smoke test"
+          SCRIPT
+          chmod +x test-deb.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              ubuntu:25.04 bash /work/test-deb.sh
+
+  # Only Rocky 9 is tested: glibc 2.34 is the supported floor.
+  rpm-install:
+    name: RHEL (Rocky 9) — install + MODULE LOAD
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in rockylinux:9 with valkey (EPEL)
+        run: |
+          cat > test-rpm.sh <<'SCRIPT'
+          set -euo pipefail
+          dnf install -qy epel-release
+          dnf install -qy valkey
+
+          dnf install -qy ./dist/packages/fractalsql-valkey-amd64.rpm
+
+          test -f /usr/lib64/valkey/modules/fractalsql.so
+          grep -E '^loadmodule /usr/lib64/valkey/modules/fractalsql\.so$' \
+              /etc/valkey/modules-available/fractalsql.conf
+
+          valkey-server --daemonize yes \
+              --loadmodule /usr/lib64/valkey/modules/fractalsql.so
+
+          for i in $(seq 1 30); do
+              valkey-cli ping >/dev/null 2>&1 && break
+              sleep 1
+          done
+          valkey-cli ping
+
+          valkey-cli MODULE LIST | grep -i fractal
+
+          dnf install -qy python3
+
+          VALKEY_CLI=valkey-cli bash /work/tests/smoke.sh
+
+          echo "ok: RPM install + MODULE LOAD + smoke test"
+          SCRIPT
+          chmod +x test-rpm.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              rockylinux:9 bash /work/test-rpm.sh
+
+  daemon-deb-install:
+    name: Debian — fractalsqld-valkey (daemon, signed plugin, MCP) + module
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install both packages in ubuntu:25.04 and exercise the daemon
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work:ro" -e PKGDIR=/work/dist/packages \
+              ubuntu:25.04 bash /work/scripts/ci/daemon_install_test.sh
+
+  daemon-rpm-install:
+    name: RHEL (Rocky 9) — fractalsqld-valkey (daemon, signed plugin, MCP) + module
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install both packages in rockylinux:9 and exercise the daemon
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work:ro" -e PKGDIR=/work/dist/packages \
+              rockylinux:9 bash /work/scripts/ci/daemon_install_test.sh
+
+  daemon-apk-install:
+    name: Alpine 3.20 — fractalsqld-valkey (daemon, signed plugin, MCP) + module
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install both packages in alpine:3.20 and exercise the daemon
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/work:ro" -e PKGDIR=/work/dist/packages \
+              alpine:3.20 sh -c 'apk add --no-cache bash >/dev/null && bash /work/scripts/ci/daemon_install_test.sh'
+
+  apk-install:
+    name: Alpine 3.20 — install musl .apk + MODULE LOAD
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Install + verify in alpine:3.20 with valkey
+        run: |
+          cat > test-apk.sh <<'SCRIPT'
+          set -euo pipefail
+          # Alpine 3.20+ ships valkey upstream — earlier alpine releases
+          # don't, so this profile is pinned to 3.20 minimum.
+          apk add --no-cache valkey valkey-cli python3
+          apk add --no-cache --allow-untrusted ./dist/packages/fractalsql-valkey-musl-amd64.apk
+
+          test -f /usr/lib/valkey/modules/fractalsql.so
+          grep -E '^loadmodule /usr/lib/valkey/modules/fractalsql\.so$' \
+              /etc/valkey/modules-available/fractalsql.conf
+
+          # Alpine doesn't have systemd; start valkey directly.
+          valkey-server --daemonize yes \
+              --loadmodule /usr/lib/valkey/modules/fractalsql.so
+
+          for i in $(seq 1 30); do
+              valkey-cli ping >/dev/null 2>&1 && break
+              sleep 1
+          done
+          valkey-cli ping
+          valkey-cli MODULE LIST | grep -i fractal
+
+          VALKEY_CLI=valkey-cli sh /work/tests/smoke.sh
+
+          echo "ok: Alpine 3.20 + musl .apk + MODULE LOAD + smoke test"
+          SCRIPT
+          chmod +x test-apk.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              alpine:3.20 sh /work/test-apk.sh
+
+  # The easy button, end to end, as a user on Debian runs it: easy_install.sh installs the package it is handed
+  # (--from-file), then the module and the snippet are there and working, and --uninstall takes them away again.
+  easy-install-linux:
+    name: "easy_install.sh: Debian, --from-file, then --uninstall"
+    needs: build-artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: packages-amd64
+          path: dist/packages
+      - name: Run easy_install.sh in ubuntu:25.04 with valkey-server
+        run: |
+          cat > test-easy-install.sh <<'SCRIPT'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq
+          apt-get install -qq -y valkey-server valkey-tools
+
+          chmod +x /work/scripts/easy_install.sh
+          /work/scripts/easy_install.sh --from-file /work/dist/packages/fractalsql-valkey-amd64.deb --yes
+
+          test -f /usr/lib/valkey/modules/fractalsql.so
+          grep -E '^loadmodule /usr/lib/valkey/modules/fractalsql\.so' /etc/valkey/modules-available/fractalsql.conf
+
+          valkey-server --daemonize yes --loadmodule /usr/lib/valkey/modules/fractalsql.so
+          for i in $(seq 1 30); do valkey-cli ping >/dev/null 2>&1 && break; sleep 1; done
+          valkey-cli MODULE LIST | grep -i fractal
+          EDITION=$(valkey-cli FRACTAL.EDITION)
+          test "${EDITION}" = "Community"
+
+          valkey-cli shutdown nosave || true
+
+          /work/scripts/easy_install.sh --uninstall --yes
+          test ! -e /usr/lib/valkey/modules/fractalsql.so
+          echo "ok: easy_install.sh --from-file, MODULE LOAD, --uninstall (Debian)"
+          SCRIPT
+          chmod +x test-easy-install.sh
+          docker run --rm -v "${{ github.workspace }}:/work" -w /work \
+              ubuntu:25.04 bash /work/test-easy-install.sh
+
+  # The installer's no-side-effect paths on a macOS runner (the real download + LOAD flow needs a published release
+  # and runs in post-release.yml).
+  easy-install-macos:
+    name: "easy_install.sh: macOS dry-run"
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: --dry-run and --uninstall --dry-run change nothing
+        run: |
+          set -euo pipefail
+          bash -n scripts/easy_install.sh
+          chmod +x scripts/easy_install.sh
+          scripts/easy_install.sh --dry-run --yes | tee /tmp/dry.log
+          grep -qi 'dry' /tmp/dry.log
+          scripts/easy_install.sh --uninstall --dry-run --yes
+          test ! -e /usr/local/lib/valkey/fractalsql.dylib
+          echo "ok: easy_install.sh dry-run on macOS"
+
+  macos-install:
+    name: macOS arm64 — build + install + MODULE LOAD
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install valkey
+        run: |
+          brew install valkey
+          valkey-server --version
+      - name: Build and install the dylib (the layout the release README describes)
+        run: |
+          set -euo pipefail
+          make
+          sudo mkdir -p /opt/fractalsql-valkey
+          sudo install -m0755 fractalsql.so /opt/fractalsql-valkey/fractalsql.dylib
+          ls -l /opt/fractalsql-valkey
+      - name: MODULE LOAD + smoke test
+        run: |
+          set -euo pipefail
+          valkey-server --daemonize yes --port 6379 --save "" \
+              --loadmodule /opt/fractalsql-valkey/fractalsql.dylib
+          for i in $(seq 1 30); do
+              valkey-cli ping >/dev/null 2>&1 && break
+              sleep 1
+          done
+          valkey-cli ping
+          valkey-cli MODULE LIST | grep -i fractal
+          VALKEY_CLI=valkey-cli bash tests/smoke.sh
+          valkey-cli shutdown nosave || true
+          echo "ok: macOS arm64 + MODULE LOAD + smoke test"
+      # The MCP server, built as the release zip builds it, staged as the zip lays it out (binary and lock files
+      # side by side) and run from a different directory, so the lock lookup beside the executable is what has to
+      # find them. Then one live tool call against a running server.
+      - name: Build + run fractalsql-valkey-mcp (as the release zip ships it)
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          SSL="$(brew --prefix openssl@3)"
+          make -C mcp clean || true
+          make -C mcp CXXFLAGS="-O2 -mmacosx-version-min=13.3" CPPEXTRA="-I${SSL}/include" LDEXTRA="-L${SSL}/lib"
+          # OpenSSL is linked dynamically from Homebrew's openssl@3: the binary must need nothing else outside the system.
+          otool -L mcp/fractalsql-valkey-mcp
+          LIBS="$(otool -L mcp/fractalsql-valkey-mcp | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically"; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the MCP binary depends on a library other than openssl@3 and the system's own"; exit 1
+          fi
+          STAGE="$(mktemp -d)"
+          cp mcp/fractalsql-valkey-mcp mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock "${STAGE}/"
+          cd "${STAGE}"
+          ./fractalsql-valkey-mcp --version
+          test "$(./fractalsql-valkey-mcp --list-tools | wc -l)" -ge 69
+          valkey-server --daemonize yes --port 6379 --save "" \
+              --loadmodule /opt/fractalsql-valkey/fractalsql.dylib
+          for i in $(seq 1 30); do
+              valkey-cli ping >/dev/null 2>&1 && break
+              sleep 1
+          done
+          (printf '%s\n' \
+              '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"install-test","version":"0"}}}' \
+              '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fractal_version","arguments":{}}}'; sleep 2) \
+              | "${STAGE}/fractalsql-valkey-mcp" 2>/tmp/mcp.err \
+              | grep -q '"isError":false' || { echo "FAIL: no successful tool call"; cat /tmp/mcp.err; exit 1; }
+          valkey-cli shutdown nosave || true
+          echo "ok: macOS MCP server built, found its locks beside the binary, answered a live tool call"
+
+  # Intel macOS, built natively on the Intel runner as release.yml builds it. No live server here (Homebrew has no
+  # Intel bottles for valkey): the checks are the architecture, the linked libraries, and that it runs with its lock
+  # files beside it.
+  macos-mcp-intel:
+    name: macOS x86_64 — MCP build + run
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Build + run fractalsql-valkey-mcp
+        run: |
+          set -euo pipefail
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          SSL="$(brew --prefix openssl@3)"
+          make -C mcp clean || true
+          make -C mcp CXXFLAGS="-O2 -mmacosx-version-min=13.3" CPPEXTRA="-I${SSL}/include" LDEXTRA="-L${SSL}/lib"
+          lipo -info mcp/fractalsql-valkey-mcp | grep -q x86_64 || { echo "FAIL: not an x86_64 binary"; exit 1; }
+          # OpenSSL is linked dynamically from Homebrew's openssl@3: the binary must need nothing else outside the system.
+          otool -L mcp/fractalsql-valkey-mcp
+          LIBS="$(otool -L mcp/fractalsql-valkey-mcp | tail -n +2 | awk '{print $1}')"
+          echo "${LIBS}" | grep -q 'openssl@3/lib/libssl' || { echo "FAIL: libssl is not linked dynamically"; exit 1; }
+          if echo "${LIBS}" | grep -v -E '^(/usr/lib/|/System/Library/|.*/opt/openssl@3/lib/lib(ssl|crypto))' | grep -q .; then
+              echo "FAIL: the MCP binary depends on a library other than openssl@3 and the system's own"; exit 1
+          fi
+          STAGE="$(mktemp -d)"
+          cp mcp/fractalsql-valkey-mcp mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock "${STAGE}/"
+          cd "${STAGE}"
+          ./fractalsql-valkey-mcp --version
+          test "$(./fractalsql-valkey-mcp --list-tools | wc -l)" -ge 69
+          echo "ok: Intel macOS MCP server built against openssl@3 dynamically, runs with its locks beside it"

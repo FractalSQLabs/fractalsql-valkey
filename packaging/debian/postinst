@@ -10,7 +10,7 @@ case "$1" in
     configure)
         cat <<'EOF'
 
-valkey-fractalsql installed.
+fractalsql-valkey 2.0.0 installed.
 
 The module is at:
     /usr/lib/valkey/modules/fractalsql.so
@@ -36,9 +36,13 @@ Enable it one of two ways:
 Verify:
 
     valkey-cli MODULE LIST
-    valkey-cli FRACTALSQL.EDITION       # -> "Community"
-    valkey-cli FRACTALSQL.VERSION       # -> "1.0.0"
+    valkey-cli FRACTAL.EDITION       # -> "Community"
+    valkey-cli FRACTAL.VERSION       # -> the installed release
     valkey-cli COMMAND INFO FRACTAL.SEARCH
+
+Reasoning, embeddings and the enterprise ledger need the fractalsqld daemon,
+installed by the fractalsqld-valkey package (see docs/fractalsql-daemon.md).
+Everything else works without it.
 
 EOF
         ;;

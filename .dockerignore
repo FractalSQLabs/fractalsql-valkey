@@ -1,0 +1,10 @@
+.git
+dist
+*.o
+*.gcda
+*.gcno
+fractalsql.so
+coverage*
+tests/fuzz
+todo.txt
+*.log

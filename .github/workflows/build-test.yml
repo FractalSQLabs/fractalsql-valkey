@@ -1,0 +1,197 @@
+name: build-test
+
+# Runs ./build_test.sh, the same gate runner used locally, so local == CI.
+# Platforms: Linux and macOS, amd64 and arm64. (No Windows: Valkey has no
+# native Windows server.)
+
+on:
+  push:
+    branches: [main, '2.x']
+  pull_request:
+    branches: [main, '2.x']
+  schedule:
+    # Weekly, in addition to every push to 2.x: the sanitizer, coverage and fuzz jobs are
+    # heavier instrumented rebuilds, so they skip pull requests and pushes to main.
+    - cron: '30 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gates-linux:
+    name: linux ${{ matrix.arch }} gates
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install valkey-server and tools
+        run: |
+          sudo apt-get update -qq
+          # libssl-dev: the MCP server gates (22-31) build fractalsql-valkey-mcp,
+          # which needs the OpenSSL development headers. Without them those gates
+          # skip, so a broken MCP surface would not fail the run.
+          sudo apt-get install -qq -y valkey-server valkey-tools python3 build-essential libssl-dev
+          valkey-server --version
+      # Gates 15, 16 and 19 drive fractalsqld against a mock LLM, and the agent code paths they reach count toward
+      # coverage; without the daemon they skip. libssl-dev (installed above) is its only extra dependency.
+      - name: Build the fractalsqld daemon
+        run: make -C service daemon
+
+      - name: Gates
+        run: ./build_test.sh
+
+  gates-macos:
+    name: macos ${{ matrix.arch }} gates
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-15 }
+          - { arch: amd64, runner: macos-15-intel }
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install valkey
+        run: |
+          brew install valkey
+          valkey-server --version
+      - name: Gates
+        run: ./build_test.sh
+
+  # Valkey 8.0 and 8.1, which the README's compatibility table promises.
+  # The distro package is 7.2, so these run the official images.
+  gates-versions:
+    name: valkey ${{ matrix.tag }} gates
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: ['8.0', '8.1']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install build tools
+        run: sudo apt-get update -qq && sudo apt-get install -qq -y python3 build-essential libssl-dev
+      - name: Extract valkey-server from the official image
+        run: |
+          id=$(docker create valkey/valkey:${{ matrix.tag }})
+          docker cp "$id":/usr/local/bin/valkey-server ./valkey-server
+          docker rm "$id"
+          ./valkey-server --version
+      # Gates 15, 16 and 19 drive fractalsqld against a mock LLM, and the agent code paths they reach count toward
+      # coverage; without the daemon they skip. libssl-dev (installed above) is its only extra dependency.
+      - name: Build the fractalsqld daemon
+        run: make -C service daemon
+
+      - name: Gates
+        run: ./build_test.sh --server "$PWD/valkey-server"
+
+  sanitizers:
+    name: linux ${{ matrix.san }} gates
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        san: ['--asan', '--ubsan', '--tsan']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install valkey-server and tools
+        run: |
+          sudo apt-get update -qq
+          # libssl-dev: the MCP server gates (22-31) build fractalsql-valkey-mcp,
+          # which needs the OpenSSL development headers. Without them those gates
+          # skip, so a broken MCP surface would not fail the run.
+          sudo apt-get install -qq -y valkey-server valkey-tools python3 build-essential libssl-dev
+      # Gates 15, 16 and 19 drive fractalsqld against a mock LLM, and the agent code paths they reach count toward
+      # coverage; without the daemon they skip. libssl-dev (installed above) is its only extra dependency.
+      - name: Build the fractalsqld daemon
+        run: make -C service daemon
+
+      - name: Gates (${{ matrix.san }})
+        run: ./build_test.sh ${{ matrix.san }}
+
+  # The Darwin counterpart of the Linux sanitizer jobs. build_test.sh injects
+  # the clang runtime into the server with DYLD_INSERT_LIBRARIES, which dyld
+  # honours for Homebrew's valkey-server but strips from Apple system binaries;
+  # the harness skips with the reason if it finds a protected server rather
+  # than reporting an unsanitized run as clean. --tsan is not attempted here.
+  darwin-sanitizers:
+    name: macos ${{ matrix.san }} gates
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: macos-15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        san: ['--asan', '--ubsan']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install valkey
+        run: |
+          brew install valkey
+          valkey-server --version
+      - name: Gates (${{ matrix.san }})
+        run: ./build_test.sh ${{ matrix.san }}
+
+  # libFuzzer over the parsers that read bytes the module does not control
+  # (gate 21, build_test.sh --fuzz). Needs clang with the libFuzzer runtime.
+  fuzz:
+    name: linux fuzz
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          # libssl-dev: gate 29 (mcp_fuzz) compiles mcp/src/db.cpp, which
+          # includes the OpenSSL headers.
+          sudo apt-get install -qq -y python3 build-essential clang libclang-rt-dev libssl-dev
+      # Eight targets run one after another (gate 21's five parsers, gate 29's three MCP parsers): a short budget per
+      # target on every push to 2.x, the long one on the weekly schedule and manual runs.
+      - name: Fuzz (gates 21 and 29)
+        env:
+          FSQL_FUZZ_TIME: ${{ github.event_name == 'push' && '30' || '120' }}
+        run: ./build_test.sh --fuzz
+
+  # gcov line coverage per source file, with a floor (build_test.sh --coverage).
+  coverage:
+    name: linux coverage
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/2.x')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: Install valkey-server and tools
+        run: |
+          sudo apt-get update -qq
+          # libssl-dev: --coverage runs the MCP server gates (35-40), which
+          # build fractalsql-valkey-mcp and need the OpenSSL development
+          # headers. Without them those gates skip, so a broken MCP surface
+          # would not fail the run.
+          sudo apt-get install -qq -y valkey-server valkey-tools python3 build-essential libssl-dev
+      # Gates 15, 16 and 19 drive fractalsqld against a mock LLM, and the agent code paths they reach count toward
+      # coverage; without the daemon they skip. libssl-dev (installed above) is its only extra dependency.
+      - name: Build the fractalsqld daemon
+        run: make -C service daemon
+
+      - name: Gates with coverage
+        run: ./build_test.sh --coverage

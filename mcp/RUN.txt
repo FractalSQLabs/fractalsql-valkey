@@ -1,0 +1,34 @@
+fractalsql-valkey-mcp: how to start the MCP server
+
+Where it is
+  .deb / .rpm package   /usr/bin/fractalsql-valkey-mcp
+  macOS archive         mcp/fractalsql-valkey-mcp, in the unpacked archive
+  The two .mcp-*-lock files must stay beside the executable: the server refuses to start without them.
+
+Settings (environment)
+  VALKEY_HOST / VALKEY_PORT      default 127.0.0.1 and 6379
+  VALKEY_SOCKET                  a Unix socket path, instead of host and port
+  VALKEY_USERNAME / VALKEY_PASSWORD (or VALKEY_PASSWORD_FILE)   an ACL user; its ACL is the authorization boundary
+  VALKEY_DB                      the database number
+  FSQL_MCP_KEY_PREFIX            the keyspace tools write only under this prefix
+  The server is a client of Valkey: the FractalSQL module (or fractalsqld) must be loaded there.
+
+stdio (the default: a client such as Claude Desktop or Cursor launches the server)
+  VALKEY_HOST=127.0.0.1 VALKEY_USERNAME=app VALKEY_PASSWORD_FILE=/etc/fractalsql/valkey.pass \
+  fractalsql-valkey-mcp
+
+HTTP or HTTPS (a bearer token is required)
+  FSQL_MCP_AUTH_TOKEN=<secret> fractalsql-valkey-mcp --http 8765
+  FSQL_MCP_AUTH_TOKEN=<secret> FSQL_MCP_HTTP_TLS=1 FSQL_MCP_TLS_CERT=cert.pem FSQL_MCP_TLS_KEY=key.pem \
+  fractalsql-valkey-mcp --http 8765
+
+Check it
+  fractalsql-valkey-mcp --version
+  fractalsql-valkey-mcp --list-tools
+
+What it needs
+  Linux    OpenSSL's runtime library (libssl.so.3), which the package depends on.
+  macOS    Homebrew's openssl@3 (brew install openssl@3). The files are unsigned: clear quarantine once
+               xattr -d com.apple.quarantine mcp/fractalsql-valkey-mcp
+
+All settings are in README.md next to this file.

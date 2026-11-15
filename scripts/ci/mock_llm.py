@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+"""Minimal OpenAI-compatible chat-completions AND embeddings mock, for
+build_test.sh's reasoning-tier gates (fractal_reason/fractal_embed/
+fractal_text_to_sql/fractal_sql_agent/the vectorizer/the Agency tier)
+without a real LLM endpoint.
+
+Routes on the request PATH (anything containing "embed" -> embeddings
+shape, everything else -> chat-completions shape) so ONE process backs
+both FRACTALSQL_HTTP_URL and FRACTALSQL_HTTP_EMBED_URL in the same gate
+run -- fractalsql-reasoning-http doesn't care about the path itself (it
+POSTs wherever it's configured), this just lets one mock instance serve
+both roles.
+
+CHAT_REPLY is a fenced ```sql block on purpose, not plain text: it has
+to work for BOTH consumers, and the mock has no way to tell which one
+is calling (RESPONSE_MODE is an env var read by fractalsql-reasoning-
+http.so itself, invisible in the HTTP request) --
+  * fractal_reason (plain chat mode) returns whatever content it gets
+    verbatim, fence markers and all -- harmless for a smoke check.
+  * fractal_text_to_sql/fractal_sql_agent's GENERATE step (RESPONSE_
+    MODE=code) extracts exactly the fenced block's contents -- needs to
+    BE a real, allowlist-passing SELECT for those gates to reach their
+    EXPLAIN-equivalent PREPARE check.
+Rejection-path testing (a candidate that FAILS the allowlist) is done
+by calling fractal_t2s_check_allowlist() directly with a hand-picked
+adversarial string instead of trying to make an LLM misbehave on
+demand, deterministic, and already covers that logic thoroughly
+without needing a second mock reply mode.
+
+Serves a fixed chat reply plus an embeddings route that this repo's
+Vectorizer/fractal_embed gates
+need (the reasoning-VFS-ABI test fixtures prove the plugin-ABI path
+directly; this HTTP mock covers the real dlopen/curl/HTTP path -- see
+build_test.sh's reasoning-gates header comment for why each restarts
+fractalsqld between call sites).
+
+Usage: python3 mock_llm.py [port]   (default port 18080)
+
+Not for production use -- no auth, no TLS, one canned reply per mode
+(plus a marker-routed second chat reply for gate_31_sql_agent_savepoint,
+see GATE31_MARKER below).
+"""
+import json
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+CHAT_REPLY = "```sql\nSELECT 1\n```"
+EMBED_VECTOR = [0.1, 0.2, 0.3]
+
+# build_test.sh's gate_31_sql_agent_savepoint needs fractal_sql_agent's
+# GENERATE step to come back with a real, allowlist-passing INSERT (not
+# the default SELECT 1) so it can drive the auto_execute mutating
+# branch and its SAVEPOINT safety net. Routed on a marker string the
+# gate embeds in its own p_question, which ends up verbatim in the
+# chat-completions request body -- every other gate's question never
+# contains this marker, so their reply is completely unaffected.
+GATE31_MARKER = "FRACTALSQL_BT_GATE31_MARKER"
+GATE31_REPLY = "```sql\nINSERT INTO bt_sql_agent_sp (id, val) VALUES (1, 'x')\n```"
+
+# fractal_t2s_review's own PASS branch (src/fractalsql_textsql.c) needs a
+# reply that starts with "pass" after whitespace-trim -- CHAT_REPLY
+# ("```sql...") never does, so every other gate's review call already
+# exercises the FAIL/return-critique-text branch, never this one. Routed
+# the same way as GATE31_MARKER: a marker string embedded in the
+# question, which ends up verbatim in fractal_t2s_review's own prompt
+# and so in this mock's request body.
+REVIEW_PASS_MARKER = "FRACTALSQL_BT_REVIEW_PASS_MARKER"
+REVIEW_PASS_REPLY = "PASS, this candidate correctly answers the request."
+
+# The "the model replied with prose, not SQL" case. fractal_text_to_sql's
+# GENERATE step (RESPONSE_MODE=code) gets a response with no fenced
+# block in it at all, so there is no candidate to allowlist, let alone
+# execute. Routed the same way as the two replies above: a marker
+# string embedded in the question, which ends up verbatim in the
+# chat-completions request body.
+#
+# Every other gate's question never contains this marker, so their
+# reply is unaffected.
+NO_SQL_MARKER = "FRACTALSQL_BT_NO_SQL_MARKER"
+NO_SQL_REPLY = "I'm sorry -- I can't answer that with a SQL statement."
+
+
+# FRACTAL.AGENT.DATA_ANALYST asks the model for ONE valkey-search query expression (the generation prompt always
+# contains the phrase below, an analysis prompt never does). The reply is routed on a marker the gate puts in the
+# question, so a gate can ask for a good expression, a retry, or a hostile one.
+VKQ_PHRASE = "valkey-search query expression"
+VKQ_GOOD = "```\n@age:[(30 +inf]\n```"
+VKQ_HOSTILE = {
+    "FRACTALSQL_BT_VKQ_NEWLINE": "```\n@age:[1 2]\nFLUSHALL\n```",          # a second command on a new line
+    "FRACTALSQL_BT_VKQ_LONG": "```\n@name:{" + "a" * 700 + "}\n```",          # over the length cap
+    "FRACTALSQL_BT_VKQ_BINARY": "```\n@name:{\x01\x02}\n```",               # control bytes
+    "FRACTALSQL_BT_VKQ_STACK": "```\n@age:[1 2]\"; FLUSHALL; \"\n```",         # shell-style stacking: just one odd argument
+    "FRACTALSQL_BT_VKQ_BADSYNTAX": "```\n@@@((\n```",                        # valkey-search refuses it, every time
+    "FRACTALSQL_BT_VKQ_PROSE": "I cannot write that query.",                   # no block at all
+}
+VKQ_RETRY_MARKER = "FRACTALSQL_BT_VKQ_RETRY"                                    # bad first, good once the prompt reports a failure
+
+
+# A reply that is one fenced JSON block, for build_test.sh's response-mode checks (gate 15): the same request
+# comes back verbatim in text mode, as the block's interior in code mode, and is validated in json mode.
+JSON_MARKER = "FRACTALSQL_BT_JSON_MARKER"
+JSON_REPLY = "```json\n{\"a\": 1}\n```"
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body_text = ""
+        if length:
+            body_text = self.rfile.read(length).decode("utf-8", "ignore")
+
+        if "embed" in self.path:
+            body = json.dumps(
+                {"data": [{"embedding": EMBED_VECTOR}]}
+            ).encode("utf-8")
+        else:
+            if VKQ_PHRASE in body_text:
+                reply = VKQ_GOOD
+                for marker, hostile in VKQ_HOSTILE.items():
+                    if marker in body_text:
+                        reply = hostile
+                if VKQ_RETRY_MARKER in body_text:
+                    reply = VKQ_GOOD if "previous attempt failed" in body_text else VKQ_HOSTILE["FRACTALSQL_BT_VKQ_BADSYNTAX"]
+            elif JSON_MARKER in body_text:
+                reply = JSON_REPLY
+            elif GATE31_MARKER in body_text:
+                reply = GATE31_REPLY
+            elif REVIEW_PASS_MARKER in body_text:
+                reply = REVIEW_PASS_REPLY
+            elif NO_SQL_MARKER in body_text:
+                reply = NO_SQL_REPLY
+            else:
+                reply = CHAT_REPLY
+            body = json.dumps(
+                {"choices": [{"message": {"role": "assistant", "content": reply}}]}
+            ).encode("utf-8")
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        # One line per request to stderr: did the plugin's HTTP POST
+        # actually arrive? build_test.sh and the CI jobs redirect this
+        # (mock's output lands in their own log files or on the FAIL
+        # branch), so it stays quiet where it needs to be -- but it makes
+        # a round-trip failure distinguishable between "no request ever
+        # arrived" (dlopen/plugin-load problem) and "request arrived but
+        # the reply wasn't accepted" (HTTP/parse problem).
+        sys.stderr.write("mock: %s %s\n" % (self.command, self.path))
+
+
+if __name__ == "__main__":
+    port = int(sys.argv[1]) if len(sys.argv) > 1 else 18080
+    HTTPServer(("127.0.0.1", port), Handler).serve_forever()

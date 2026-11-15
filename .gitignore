@@ -2,27 +2,28 @@
 *.so
 *.o
 *.a
+*.dylib
 fractalsql.so
 
-# NOTE: include/sfs_core_bc.h is a tracked source file
-# (pre-compiled LuaJIT bytecode). Do not add it to this list.
+# Tracked exceptions: the vendored core and reasoning libraries under include/ (the flat layout and the
+# per-platform include/<os>-<arch>/ directories) are committed; the build links them and verifies them against
+# include/.artifacts.sha256. `**` is needed because `*` does not cross a directory separator.
+!include/**/*.a
+!include/**/*.so
+!include/**/*.dylib
 
-# redismodule.h / valkeymodule.h are fetched from upstream Valkey at
-# build time (see Makefile and docker/Dockerfile). Valkey's
-# redismodule.h is a shim that #includes valkeymodule.h, so both
-# files are needed for a successful compile. Not checked-in vendor
-# copies.
-include/redismodule.h
-include/valkeymodule.h
+# include/redismodule.h is a tracked, vendored source file (the Redis 7.2 module API; the Makefile and
+# Dockerfile never fetch it, and include/.artifacts.sha256 checksums it). Do not add it to this list.
 
 # Build output trees
 dist/
+service/build/
 
 # Packaging temp files (fpm + debhelper + rpmbuild stagedirs)
 *.deb
 *.rpm
 packaging/debian/.debhelper/
-packaging/debian/valkey-fractalsql/
+packaging/debian/fractalsql-valkey/
 packaging/debian/files
 packaging/debian/*.log
 packaging/debian/*.substvars
@@ -40,3 +41,41 @@ packaging/rpm/SRPMS/
 *~
 .DS_Store
 Thumbs.db
+.build_test_flavor
+*.d
+
+# Coverage, fault-sweep and local test output
+*.gcda
+*.gcno
+*.gcov
+.oomcov/
+__pycache__/
+*.pyc
+
+# Built MCP server and its object tree
+mcp/fractalsql-valkey-mcp
+mcp/build/
+
+# Local tooling
+.claude/
+
+# Fuzzer, sanitizer, profiler and coverage output (build_test.sh --fuzz/--asan/--profile/--coverage)
+crash-*
+leak-*
+timeout-*
+oom-*
+fuzz-*.log
+*.profraw
+*.profdata
+*.lcov
+coverage*/
+callgrind.out*
+massif.out*
+vgcore.*
+core.[0-9]*
+
+# SonarQube scanner and editor tooling caches
+.scannerwork/
+.cache/
+.clangd
+compile_commands.json

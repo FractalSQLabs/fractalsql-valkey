@@ -1,0 +1,132 @@
+# FractalSQL for Valkey: the demo stack. Two services share a unix socket in a volume,
+# the fractalsqld container holds the core and the
+# reasoning plugin and talks to a model; the valkey container loads only the module and
+# reaches the daemon over the socket.
+#
+#   export FSQL_HMAC_KEY=$(openssl rand -hex 32)
+#   docker compose up -d
+#   docker compose exec valkey /demo/run_demo.sh
+#
+# Required: FSQL_HMAC_KEY (hex), written into the shared volume by the daemon.
+# Model host: OLLAMA_HOST (default "ollama", the compose service in the `ollama` profile). Point it
+# at any Ollama-compatible server that has gpt-oss:20b and nomic-embed-text, or leave reasoning
+# unconfigured: FRACTAL.REASON and FRACTAL.EMBED then answer "not configured" and everything
+# else works.
+#   docker compose --profile ollama up -d                    # bundled Ollama
+#   docker compose --profile pull-model run --rm pull-model   # one-time model download
+# Valkey release: VALKEY_VERSION (default 8.1; 7.2 and 8.0 also work).
+#
+# FractalSQL does not depend on valkey-search or valkey-json: the default service is plain
+# Valkey plus this module, and every command works there. The `search` profile adds the
+# official valkey-bundle image (valkey-search, valkey-json, valkey-bloom, valkey-ldap), used ONLY
+# by bench/ (HNSW vs FRACTAL.EXPLORE) and the composition examples in docs/.
+services:
+  fractalsqld:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: fractalsqld
+      args:
+        VALKEY_VERSION: ${VALKEY_VERSION:-8.1}
+        VALKEY_IMAGE_DIGEST: ${VALKEY_IMAGE_DIGEST:-sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809}
+    environment:
+      FSQL_HMAC_KEY: ${FSQL_HMAC_KEY:?set FSQL_HMAC_KEY (openssl rand -hex 32)}
+      FRACTALSQL_REASONING_PLUGIN: /usr/lib/fractalsql/fractalsql-reasoning-http.so
+      FRACTALSQL_HTTP_URL: http://${OLLAMA_HOST:-ollama}:11434/v1/chat/completions
+      # Demo only: the model endpoint is the ollama container on the private compose network, reached over plain
+      # HTTP, so prompts (which can carry retrieved rows) are not encrypted on that hop. Point
+      # FRACTALSQL_HTTP_URL at an https:// endpoint and drop this line for anything beyond a local demo.
+      FRACTALSQL_HTTP_ALLOW_PLAINTEXT: "1"
+      FRACTALSQL_HTTP_MODEL: gpt-oss:20b
+      FRACTALSQL_HTTP_EMBED_URL: http://${OLLAMA_HOST:-ollama}:11434/v1/embeddings
+      FRACTALSQL_HTTP_EMBED_MODEL: nomic-embed-text
+      FSQL_REASONING_HTTP_TIMEOUT_MS: "120000"
+      FSQL_REASONING_HTTP_LOW_SPEED_SECS: "60"
+    user: "999:999"            # valkey, the uid the daemon admits (allowed_uids)
+    restart: unless-stopped
+    stop_grace_period: 20s     # SIGTERM stops accepting; in-flight calls finish
+    read_only: true            # root filesystem is read-only; state is in the volume
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    volumes:
+      - fsqld_run:/run/fractalsql
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/fractalsql/fractalsqld.sock"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  valkey:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: demo
+      args:
+        VALKEY_VERSION: ${VALKEY_VERSION:-8.1}
+        VALKEY_IMAGE_DIGEST: ${VALKEY_IMAGE_DIGEST:-sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809}
+    depends_on:
+      fractalsqld:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - fsqld_run:/run/fractalsql
+    command: ["valkey-server", "--save", "",
+              "--loadmodule", "/usr/lib/valkey/fractalsql.so",
+              "daemon-socket", "/run/fractalsql/fractalsqld.sock",
+              "daemon-key-file", "/run/fractalsql/hmac.key",
+              "daemon-timeout-s", "330"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "FRACTAL.VERSION"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  ollama:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.9.0@sha256:2ea3b768a8f2dcd4d910f838d79702bb952089414dd578146619c0a939647ac6}   # pinned; override via OLLAMA_IMAGE_TAG (pin by @sha256 digest for production)
+    profiles: ["ollama", "pull-model"]
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  pull-model:
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.9.0@sha256:2ea3b768a8f2dcd4d910f838d79702bb952089414dd578146619c0a939647ac6}   # pinned; override via OLLAMA_IMAGE_TAG (pin by @sha256 digest for production)
+    profiles: ["pull-model"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "ollama:11434"
+    entrypoint: ["/bin/sh", "-c", "ollama pull gpt-oss:20b && ollama pull nomic-embed-text"]
+
+  valkey-search:
+    profiles: ["search"]
+    image: valkey/valkey-bundle:8.1@sha256:3f57cc71a102e0e66991ae203b069038d8c3f6214ca887ff32f9a381091af8de
+    ports:
+      - "127.0.0.1:16380:6379"
+    volumes:
+      - ./dist/amd64/fractalsql.so:/modules/fractalsql.so:ro
+    # the bundle's entrypoint loads every module in /usr/lib/valkey; ours is added here
+    command: ["valkey-server", "--loadmodule", "/modules/fractalsql.so"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "FRACTAL.VERSION"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  fsqld_run:
+  ollama_data:
