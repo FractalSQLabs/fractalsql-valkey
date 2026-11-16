@@ -79,3 +79,4 @@ core.[0-9]*
 .cache/
 .clangd
 compile_commands.json
+*.mmd

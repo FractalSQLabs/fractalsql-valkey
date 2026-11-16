@@ -57,7 +57,9 @@ Depending on your role, you'll want to start in different places:
 ---
 
 ## 🧩 What's in the box
-
+<p align="center">
+  <img src="docs/fractalsql-valkey-architecture.jpg" alt="FractalSQL for Valkey diagram" width="900">
+</p>
 Four tiers of commands (Discovery, Cognition, Agency, Analytics), composable in your application, plus an optional Enterprise ledger.
 
 - **Discovery**: diverse, mode-collapse-free retrieval: `FRACTAL.SEARCH` (Sniper) and `FRACTAL.EXPLORE` (Scout), plus named sessions that remember what a caller rejected (`FRACTAL.DIVERSIFY.*`, `FRACTAL.FEEDBACK`, `SESSION`). See [Discovery](docs/api-discovery.md).
