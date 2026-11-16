@@ -112,13 +112,12 @@ full mechanism, including what the hash chain can and can't prove.
 
 | Valkey | Linux amd64 | Linux arm64 | Linux musl | macOS |
 | --- | :---: | :---: | :---: | :---: |
-| 7.2 | ✓ | ✓ | ✓ | ✓ |
-| 8.0 | ✓ | ✓ | ✓ | ✓ |
-| 8.1 | ✓ | ✓ | ✓ | ✓ |
+| 7.x | ✓ | ✓ | ✓ | ✓ |
+| 8.x | ✓ | ✓ | ✓ | ✓ |
 
 Linux musl (Alpine) covers amd64 and arm64.
 
-`build_test.sh` runs on every push: against Valkey 7.2.15, 8.0.12 and 8.1.11 on Linux amd64, against 7.2 on Linux
+`build_test.sh` runs on every push: against Valkey 7.x and 8.x on Linux amd64, against 7.x on Linux
 arm64, and against the `valkey` Homebrew installs on macOS (arm64 and Intel). One `fractalsql.so` (`fractalsql.dylib`
 on macOS) per platform covers every supported Valkey release, because the module API (`REDISMODULE_APIVER_1`) is stable.
 
