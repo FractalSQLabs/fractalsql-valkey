@@ -47,6 +47,7 @@ python3 bench/vector_type_head_to_head.py --port 6379 --n 2000 --dim 128
   bounds how much decoded data can be held at once.
 - `SEARCH` ranks by cosine distance. A brute-force scan that ranks by Euclidean distance is a
   different question and will not return the same rows.
+
 ## Head to head: valkey-search HNSW vs Scout
 
 `head_to_head.py` compares valkey-search's HNSW index with Scout

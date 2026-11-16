@@ -128,8 +128,8 @@ FRACTAL.EXPLORE <corpus_key> <query_blob> [population_size] [SESSION <session>]
 ```
 
 The corpus and query are as above. Scout disperses its particles across the data's distinct basins around the query, so it reaches
-wider than top-k, and a larger population reaches further: in the kits, 40 particles reached two of six clusters and 200 reached all
-six. It scans the corpus on every call (O(N x dim)), which is its trade-off against an index; see
+wider than top-k, and a larger population reaches further: in the recommendation kit (240 items in six clusters), a population of a few
+dozen stayed in the query's own cluster and a few hundred reached all six. It scans the corpus on every call (O(N x dim)), which is its trade-off against an index; see
 [features.md](features.md#-benchmarks--scaling).
 
 ### Return

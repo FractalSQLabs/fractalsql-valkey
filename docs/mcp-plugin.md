@@ -15,7 +15,7 @@ assistant  --MCP (stdio or HTTP/TLS)-->  fractalsql-valkey-mcp  --RESP-->  Valke
 
 The tools are the module's commands: `fractal_search` is `FRACTAL.SEARCH`, `fractal_agent_regime_triage` is `FRACTAL.AGENT.REGIME_TRIAGE`, and so on.
 The server's job is the part an assistant is bad at: it turns JSON numbers into the packed float32 blobs the commands take, validates every argument before a
-byte reaches Valkey, and turns the replies back into JSON. Tool names follow the other FractalSQL MCP servers wherever the same capability exists.
+byte reaches Valkey, and turns the replies back into JSON.
 
 ## Quick start
 
@@ -199,7 +199,7 @@ catalog, and the session-state handles.
 
 ## Session state
 
-Two kinds of server-side state exist, and both are bounded: the engine connection a context-scoped call runs on, and the engine connection a stateless
+Two kinds of server-side state exist, and both are bounded: the Valkey connection a context-scoped call runs on, and the Valkey connection a stateless
 call runs on. Each is held in the same registry, so the same two settings bound both.
 
 A **context handle** (`context_id`) is an opaque 128-bit hex string the server mints. A caller of a context-scoped tool that names no handle gets one
@@ -259,7 +259,7 @@ connects as:
 - the scratch key `fsqlmcp:tmp:…` an inline `corpus` is written to for a search. It carries a 120-second expiry and is deleted again as soon as the
   search returns.
 
-The engine's own state — the diversify sessions, the agent decision documents and the decision ledger — lives behind the module's commands, in the
+The module's own state — the diversify sessions, the agent decision documents and the decision ledger — lives behind the module's commands, in the
 module's memory and, for the ledger, in the daemon's chain. The MCP server holds none of it itself.
 
 **In the daemon's data directory.** The decision ledger is not in Valkey and not in this server. The daemon writes three files, all next to each other
@@ -291,8 +291,7 @@ written analysis — plus a server-assigned `_actor` block (the Valkey client id
   it read — in the clear.
 - **The Valkey keyspace is covered by whatever your Valkey deployment offers.** Upstream Valkey has no record-level encryption: there is no setting that
   encrypts a key or a value inside the dataset, and its documented security controls are TLS for traffic in transit, ACLs, network isolation and protected
-  mode. A managed Valkey service may add its own at-rest encryption for the data it holds — Amazon ElastiCache, for example, supports at-rest encryption
-  on replication groups running Valkey 7.2 and later and enables it by default for Valkey — and where the deployment you run offers it, that is what
+  mode. A managed Valkey service may add its own at-rest encryption for the data it holds, and where the deployment you run offers it, that is what
   protects the keyspace. Check the product's own documentation for the version you run before assuming it is on. Where it is not, the keyspace is covered
   by the encryption of the volume it lives on, like everything else here.
 - **The bearer token file is covered by the volume and by its permissions.** It holds a secret in the clear, so it belongs on the same footing as the
@@ -516,7 +515,7 @@ hardened deployment are collected in the [MCP README](../mcp/README.md).
 | `FSQL_MCP_READ_ONLY` | `false` | Refuse every tool annotated destructive before it reaches Valkey, and latch the module's destructive ledger commands for the connection |
 | `FSQL_MCP_REQUIRE_LEDGER_LATCH` | `false` | With read-only mode on, refuse the Valkey connection when the ledger latch cannot be applied instead of warning |
 | `FSQL_MCP_ALLOW_AUTO_EXECUTE` | off | Let a model ask for `auto_execute` on the tools that take it. Off by default: the parameter is controlled by the same actor the control protects against, so the operator decides |
-| `FSQL_MCP_CONFIG_WRITES` | `safe` | Which config keys a config-writing tool may write (`off`, `safe`, `all`). This engine exposes no config-writing tool, so the switch has no call site today and the safe set is empty |
+| `FSQL_MCP_CONFIG_WRITES` | `safe` | Which config keys a config-writing tool may write (`off`, `safe`, `all`). This server has no config-writing tool, so the switch has no effect and the safe set is empty |
 | `FSQL_MCP_TOOL_WHITELIST` / `--tool a,b` | all | Serve only these tools |
 | `FSQL_MCP_ENABLED_CATEGORIES` / `--category x,y` | all | Serve only these categories (`discovery`, `cognition`, `agency`, `analytics`, `enterprise`, `keyspace`, `admin`) |
 
@@ -550,10 +549,10 @@ hardened deployment are collected in the [MCP README](../mcp/README.md).
 | `FSQL_MCP_VALKEY_TIMEOUT_MS` | `600000` | One reply. A model-backed agent can take minutes; size it for yours |
 | `FSQL_MCP_VALKEY_MAX_REPLY_MB` | `64` | Largest reply accepted. A server claiming more is refused and the connection dropped |
 
-**The daemon and the engine behind it**
+**The daemon**
 
-The server above is one process. The model-backed tools and the audit trail belong to two others: the `fractalsqld` daemon, and the module and engine it
-drives. Those read their own environment, so the settings below are set on the daemon rather than on the MCP server.
+The server above is one process. The model-backed tools and the audit trail belong to another, the `fractalsqld` daemon. It reads its own environment,
+so the settings below are set on the daemon rather than on the MCP server.
 
 | Setting | Default | Effect |
 | --- | --- | --- |

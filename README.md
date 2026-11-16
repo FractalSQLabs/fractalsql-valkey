@@ -10,8 +10,9 @@
 FractalSQL turns Valkey from a fast key-value store into a place where you can ask what
 your vectors *mean*, and where agentic workflows can run beside your data: not only "what is closest", but "what distinct things are here", "did
 this series change regime", "is this agent going around in circles". It adds what a plain
-nearest-neighbour lookup structurally cannot, all inside the same server process, with
-FractalSQL statically linked and no runtime dependency beyond libc.
+nearest-neighbour lookup structurally cannot. The search and analytics commands run inside
+the Valkey process, with FractalSQL statically linked and no runtime dependency beyond libc;
+reasoning and the ledger run in a separate daemon.
 
 By keeping search, discovery, analytics and agentic workflows next to the data, FractalSQL enables
 **Sovereign Data Intelligence**: the ability to reason about your data with the deployment
@@ -148,12 +149,12 @@ For enterprise editions, licensing, and support, contact **enterprise@fractalsql
 
 ```bash
 make                            # fractalsql.so with the vendored core
-./build_test.sh                 # 18 gates; --quick, --gate N, --asan, --ubsan, --tsan, --coverage
+./build_test.sh                 # the whole suite; --quick, --gate N, --asan, --ubsan, --tsan, --coverage
 ./build.sh amd64                # the release build, in a container (glibc 2.34)
 ```
 
 `build_test.sh` mirrors what CI runs and uses a private port and temp directory per run, so it
-never collides with a server you already have. Gates 15 and 16 (the daemon tier) need a
+never collides with a server you already have. The daemon checks need a
 `fractalsqld` binary (`--fractalsqld PATH`, or `FSQL_DAEMON`) and skip loudly without one;
-gate 16 additionally needs an enterprise library (`FSQL_ENTERPRISE_LIB`), which is never
-vendored here.
+the enterprise ledger checks additionally need an enterprise library (`FSQL_ENTERPRISE_LIB`),
+which is never vendored here.

@@ -110,7 +110,7 @@ when neither names a session. Name a session explicitly and the call acts on tha
 | `FSQL_MCP_READ_ONLY` | `false` | Refuse every tool annotated destructive before it reaches Valkey, and latch the module's destructive ledger commands for the connection. |
 | `FSQL_MCP_REQUIRE_LEDGER_LATCH` | `false` | With read-only mode on, refuse the Valkey connection when the ledger latch cannot be applied instead of warning. |
 | `FSQL_MCP_ALLOW_AUTO_EXECUTE` | off | Let a model ask for `auto_execute` on the tools that take it. Off by default: the parameter is controlled by the same actor the control protects against, so the operator decides. |
-| `FSQL_MCP_CONFIG_WRITES` | `safe` | Which config keys a config-writing tool may write (`off`, `safe`, `all`). This engine exposes no config-writing tool, so the switch has no call site today. |
+| `FSQL_MCP_CONFIG_WRITES` | `safe` | Which config keys a config-writing tool may write (`off`, `safe`, `all`). This server has no config-writing tool, so the switch has no effect. |
 | `FSQL_MCP_TOOL_WHITELIST` / `--tool a,b` | all | Serve only these tools. |
 | `FSQL_MCP_ENABLED_CATEGORIES` / `--category x,y` | all | Serve only these categories (`discovery`, `cognition`, `agency`, `analytics`, `enterprise`, `keyspace`, `admin`). |
 | `FSQL_MCP_MAX_CONCURRENT_CHEAP` | `50` | How many cheap calls run at once. |
@@ -159,8 +159,7 @@ is true of the keyspace the store tools write into.
 covered by volume encryption only — encrypt the disk, the volume or the backups they live on, and they are covered; there is no setting that encrypts a
 record inside them, and this project does not encrypt records inside the ledger. The keyspace is covered by whatever your Valkey deployment offers:
 upstream Valkey has no record-level encryption (its documented controls are TLS in transit, ACLs, network isolation and protected mode), while a managed
-service may add its own — Amazon ElastiCache, for example, supports at-rest encryption on replication groups running Valkey 7.2 and later and enables it by
-default for Valkey. Check the product's own documentation for the version you run before assuming it is on; where it is not, the keyspace is covered by the
+service may add its own. Check the product's own documentation for the version you run before assuming it is on; where it is not, the keyspace is covered by the
 encryption of the volume it lives on, like everything else. The MCP server's own bearer-token file holds a secret in the clear, so it belongs on the same
 footing as the daemon's key file.
 

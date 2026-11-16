@@ -11,7 +11,7 @@ Settings (environment)
   VALKEY_USERNAME / VALKEY_PASSWORD (or VALKEY_PASSWORD_FILE)   an ACL user; its ACL is the authorization boundary
   VALKEY_DB                      the database number
   FSQL_MCP_KEY_PREFIX            the keyspace tools write only under this prefix
-  The server is a client of Valkey: the FractalSQL module (or fractalsqld) must be loaded there.
+  The server is a client of Valkey: the FractalSQL module must be loaded there. The reasoning, embedding and ledger tools also need fractalsqld.
 
 stdio (the default: a client such as Claude Desktop or Cursor launches the server)
   VALKEY_HOST=127.0.0.1 VALKEY_USERNAME=app VALKEY_PASSWORD_FILE=/etc/fractalsql/valkey.pass \

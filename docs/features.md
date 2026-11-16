@@ -5,7 +5,8 @@
 # FractalSQL Feature Specification
 
 FractalSQL for Valkey is a module: commands you call from any Valkey client, running in the server
-process with the FractalSQL core statically linked. Vectors live in ordinary string keys as packed
+process with the FractalSQL core statically linked. Reasoning and embedding go through the
+separate `fractalsqld` daemon. Vectors live in ordinary string keys as packed
 little-endian float32, and what you would keep beside a vector (an id, some content, a filter attribute) lives in
 companion hashes whose field is the row index. Search, reasoning and the agents are the building blocks for agentic
 workflows that run beside your data.
@@ -19,7 +20,7 @@ includes.
 
 | Tier | Focus | Key Capabilities | Build / Requirement |
 | --- | --- | --- | --- |
-| **Community** | Discovery, Cognition, Agency, Analytics | SFS Core, Sniper Search, Scout Discovery, In-Server Reasoning and Embeddings (through the daemon), 16 ready-made agents and 5 building blocks, the full Analytics set | `fractalsql.so`, everything most installs need; the reasoning and embedding commands use the optional `fractalsqld` daemon |
+| **Community** | Discovery, Cognition, Agency, Analytics | SFS Core, Sniper Search, Scout Discovery, Reasoning and Embeddings (through the daemon), 16 ready-made agents and 5 building blocks, the full Analytics set | `fractalsql.so`, everything most installs need; the reasoning and embedding commands use the optional `fractalsqld` daemon |
 | **Enterprise** | Governance | Activation gating plus a real, tamper-evident ledger storage layer. See [Enterprise Tier](enterprise.md) for the full scope | the licensed core, held by the daemon and never loaded into the Valkey process |
 
 The split keeps anything that can block on the network, load third-party code, or hold licensed code out of your
@@ -39,8 +40,8 @@ ranks by **cosine distance**, so a brute-force check must too.
 
 ### Scout Discovery (`FRACTAL.EXPLORE`)
 An SFS population search that disperses its particles across the data's distinct basins of attraction, instead of
-the "mode collapse" common in top-K search, and returns the population. Its reach grows with the population (40
-particles reached two of six clusters in the kits, 200 reached all six). The corpus is a key, scanned on every call;
+the "mode collapse" common in top-K search, and returns the population. Its reach grows with the population (in the
+recommendation kit, a population of a few dozen stayed in the query's own cluster and a few hundred reached all six). The corpus is a key, scanned on every call;
 see [Benchmarks & Scaling](#-benchmarks--scaling) for what that costs.
 
 ### Diversify / Repulsion Sessions
@@ -61,7 +62,7 @@ pluggable provider. On Valkey the provider lives in the **`fractalsqld` daemon**
 never stall or take down the datastore; without a daemon every other command works and these answer with a clear
 "not configured" error. See [reasoning-setup.md](reasoning-setup.md).
 
-### In-Server Reasoning (`FRACTAL.REASON`)
+### Reasoning (`FRACTAL.REASON`)
 Sends a query (and optional JSON context) to the configured reasoning provider and returns its text. Never retried
 automatically, and the provider settings are operator-only (in `fractalsqld.conf`), never settable through a command.
 See [api-cognition.md](api-cognition.md).
