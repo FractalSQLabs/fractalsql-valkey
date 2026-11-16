@@ -110,11 +110,13 @@ full mechanism, including what the hash chain can and can't prove.
 
 ## 📊 Compatibility & License
 
-| Valkey | Linux amd64 | Linux arm64 | macOS |
-| --- | :---: | :---: | :---: |
-| 7.2 | ✓ | ✓ | ✓ |
-| 8.0 | ✓ | ✓ | ✓ |
-| 8.1 | ✓ | ✓ | ✓ |
+| Valkey | Linux amd64 | Linux arm64 | Linux musl | macOS |
+| --- | :---: | :---: | :---: | :---: |
+| 7.2 | ✓ | ✓ | ✓ | ✓ |
+| 8.0 | ✓ | ✓ | ✓ | ✓ |
+| 8.1 | ✓ | ✓ | ✓ | ✓ |
+
+Linux musl (Alpine) covers amd64 and arm64.
 
 `build_test.sh` runs on every push: against Valkey 7.2.15, 8.0.12 and 8.1.11 on Linux amd64, against 7.2 on Linux
 arm64, and against the `valkey` Homebrew installs on macOS (arm64 and Intel). One `fractalsql.so` (`fractalsql.dylib`
