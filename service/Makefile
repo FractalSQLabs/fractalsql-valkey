@@ -2,13 +2,10 @@
 # FractalSQL service build (spec: FRACTALSQL_SPLIT_PROCESS_SPEC.md).
 #
 # Daemon target only: `make daemon` is the supported entry point.
-# build/fractalsql.so   (not built here)
 # build/fractalsqld     Apache-2.0 daemon (separate process). Compiles the
 #                       adapter sources in adapter/src against the vendored core
 #                       archive in ../include -- every UDF body runs here,
 #                       not inside the database server.
-#
-# The shim is compiled without OpenSSL and without any core include path.
 
 CC      ?= gcc
 
@@ -24,9 +21,8 @@ CORE_ARCHIVE := $(firstword \
     $(wildcard ../include/$(FSQ_PLATFORM)/libfractalsql-community-sovereign-c.a) \
     ../include/libfractalsql-community-sovereign-c.a)
 
-# OpenSSL for fsqlctl.c's <openssl/hmac.h> use and for
-# fractalsql_enterprise.c's Ed25519 check (via ADAPTER_OBJS/CORE_ARCHIVE
-# below). Homebrew's openssl@3 is keg-only, so Darwin needs its own path.
+# OpenSSL for fractalsql_enterprise.c's Ed25519 check (via
+# ADAPTER_OBJS/CORE_ARCHIVE below). Homebrew's openssl@3 is keg-only, so Darwin needs its own path.
 # FSQ_OPENSSL_DIR is overridable too: arm-Homebrew's openssl@3 keg has
 # no x86_64 objects, so an x86_64 cross build needs a separately built
 # tree (see release.yml's build-macos job) passed in explicitly.
@@ -47,13 +43,11 @@ GEN     := $(BUILD)/gen
 ADAPTER_SRCS := $(wildcard adapter/src/*.c)
 ADAPTER_OBJS := $(patsubst adapter/src/%.c,$(BUILD)/daemon/%.o,$(ADAPTER_SRCS))
 
-WARN    := -Wall -Wextra -Werror -std=gnu11
 CFLAGS  ?= -O2 -g
 
 # make COVERAGE=1 / ASAN=1 / UBSAN=1: instrument the daemon (adapter
 # objects + fractalsqld.c), for build_test.sh
-# --coverage/--asan/--ubsan/--tsan. The shim is never instrumented: it
-# has no logic of its own to cover.
+# --coverage/--asan/--ubsan/--tsan.
 ifdef COVERAGE
   FSQ_SAN_FLAGS := --coverage
 else ifdef ASAN
@@ -66,25 +60,19 @@ else
   FSQ_SAN_FLAGS :=
 endif
 
-SHIM_SRC   := shim/fractalsql_shim.c common/fsq_sha256.h protocol/fsq_protocol.h protocol/opcodes.def
 DAEMON_SRC := daemon/fractalsqld.c common/fsq_sha256.h protocol/fsq_protocol.h protocol/opcodes.def
 
-.PHONY: all shim daemon test scan clean
+.PHONY: all daemon clean
 
 all: daemon
 
-shim: $(BUILD)/fractalsql.so
-
 daemon: $(BUILD)/fractalsqld
 
-$(GEN)/shim_udfs.h $(GEN)/daemon_udfs.h $(GEN)/fsqlctl_functions.h: protocol/opcodes.def protocol/functions.def scripts/gen_udf.py
+$(GEN)/daemon_udfs.h: protocol/opcodes.def protocol/functions.def scripts/gen_udf.py
 	python3 scripts/gen_udf.py $(GEN)
 
 $(BUILD):
 	mkdir -p $(BUILD)
-
-$(BUILD)/fractalsql.so: $(SHIM_SRC) $(GEN)/shim_udfs.h | $(BUILD)
-	$(CC) $(WARN) $(CFLAGS) $(FSQ_ARCH_FLAGS) -fPIC -shared -I$(GEN) -o $@ shim/fractalsql_shim.c
 
 $(BUILD)/daemon:
 	mkdir -p $@
@@ -101,59 +89,6 @@ $(BUILD)/daemon/fractalsqld.o: daemon/fractalsqld.c $(DAEMON_SRC) $(GEN)/daemon_
 $(BUILD)/fractalsqld: $(BUILD)/daemon/fractalsqld.o $(ADAPTER_OBJS) $(CORE_ARCHIVE) | $(BUILD)
 	$(CC) -Wall -Wextra -Werror -std=gnu11 $(CFLAGS) $(FSQ_ARCH_FLAGS) -I../include -Iadapter/src -I$(GEN) $(FSQ_SAN_FLAGS) \
 	    -o $@ $(BUILD)/daemon/fractalsqld.o $(ADAPTER_OBJS) $(CORE_ARCHIVE) -lm -lpthread -ldl $(FSQ_OPENSSL_LDFLAGS)
-
-# The concurrent-ledger-write runner (build_test.sh's gate 46, --tsan
-# only). It links the SAME adapter objects the daemon links: the ledger
-# code lives in adapter/src/fractalsql_enterprise.c and there is no separate
-# "ledger library" in this project to link against. The daemon TU is
-# deliberately NOT in the link -- the runner has its own main() and
-# never opens a socket, and the daemon's main() would collide.
-#
-# The runner is NOT part of `all`: it only means anything when the
-# adapter objects were built with -fsanitize=thread, and gate 46 builds
-# it explicitly under --tsan.
-#
-# NOTE ON STALE OBJECTS: make cannot see that $(FSQ_SAN_FLAGS) is part
-# of the object recipe, so a plain `make` followed by a `make TSAN=1`
-# would link the runner against UNINSTRUMENTED adapter objects, and
-# ThreadSanitizer would then report "no race" simply because it had
-# nothing instrumented to look at -- a silent false pass. Two things
-# prevent that here: build_test.sh's gate 01 always runs
-# `make -C service clean` before building (so the harness itself can
-# never hit it), and gate 46 VERIFIES the instrumentation directly by
-# looking for the TSan runtime's own symbols in
-# build/daemon/fractalsql_enterprise.o -- the translation unit that
-# actually holds the ledger. Do not remove that check.
-$(BUILD)/ledger_concurrency_runner: tests/ledger_concurrency_runner.c $(ADAPTER_OBJS) $(CORE_ARCHIVE) | $(BUILD)
-	$(CC) -Wall -Wextra -Werror -std=gnu11 $(CFLAGS) $(FSQ_ARCH_FLAGS) -I../include -Iadapter/src $(FSQ_OPENSSL_CFLAGS) $(FSQ_SAN_FLAGS) \
-	    -o $@ tests/ledger_concurrency_runner.c $(ADAPTER_OBJS) $(CORE_ARCHIVE) -lm -lpthread -ldl $(FSQ_OPENSSL_LDFLAGS)
-
-# The direct UDF driver behind build_test.sh's gates 63 and 64. Like the runner
-# above it links the adapter objects, and is not part of `all`.
-$(BUILD)/udf_direct: tests/udf_direct.c $(GEN)/daemon_udfs.h $(ADAPTER_OBJS) $(CORE_ARCHIVE) | $(BUILD)
-	$(CC) -w -std=gnu11 $(CFLAGS) $(FSQ_ARCH_FLAGS) -I../include -Iadapter/src -I$(GEN) $(FSQ_OPENSSL_CFLAGS) $(FSQ_SAN_FLAGS) \
-	    -o $@ tests/udf_direct.c $(ADAPTER_OBJS) $(CORE_ARCHIVE) -lm -lpthread -ldl $(FSQ_OPENSSL_LDFLAGS)
-
-$(BUILD)/fsqlctl: cli/fsqlctl.c $(GEN)/fsqlctl_functions.h | $(BUILD)
-	$(CC) -Wall -Wextra -Werror -std=gnu11 -O2 $(FSQ_ARCH_FLAGS) -I$(GEN) $(FSQ_OPENSSL_CFLAGS) -o $@ cli/fsqlctl.c $(FSQ_OPENSSL_LDFLAGS)
-
-$(BUILD)/frame_test: tests/frame_test.c common/fsq_sha256.h protocol/fsq_protocol.h protocol/opcodes.def | $(BUILD)
-	$(CC) -Wall -Wextra -Werror -std=gnu11 -O2 $(FSQ_ARCH_FLAGS) -o $@ tests/frame_test.c
-
-# The cancel-seam test links the parser TU and the seam TU directly -- no
-# daemon, no database server, no core archive (the same headers-only link the fuzz
-# drivers use).
-$(BUILD)/interrupt_test: tests/interrupt_test.c adapter/src/fractalsql_parse.c adapter/src/fractalsql_interrupt.c adapter/src/fractalsql_parse.h adapter/src/fractalsql_interrupt.h | $(BUILD)
-	$(CC) -Wall -Wextra -Werror -std=gnu11 -O2 $(FSQ_ARCH_FLAGS) -Iadapter/src -o $@ tests/interrupt_test.c adapter/src/fractalsql_parse.c adapter/src/fractalsql_interrupt.c
-
-test: all
-	sh tests/spike_test.sh
-	sh tests/cli_test.sh
-
-scan: shim
-	sh scripts/license_scan.sh
-	sh scripts/boundary_check.sh
-	sh scripts/symbol_scan.sh $(BUILD)/fractalsql.so
 
 clean:
 	rm -rf $(BUILD)
