@@ -34,7 +34,7 @@ jobs:
           - { arch: amd64, runner: ubuntu-24.04 }
           - { arch: arm64, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install valkey-server and tools
         run: |
           sudo apt-get update -qq
@@ -63,7 +63,7 @@ jobs:
           - { arch: arm64, runner: macos-15 }
           - { arch: amd64, runner: macos-15-intel }
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install valkey
         run: |
           brew install valkey
@@ -83,7 +83,7 @@ jobs:
       matrix:
         tag: ['8.0', '8.1']
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install build tools
         run: sudo apt-get update -qq && sudo apt-get install -qq -y python3 build-essential libssl-dev
       - name: Extract valkey-server from the official image
@@ -110,7 +110,7 @@ jobs:
       matrix:
         san: ['--asan', '--ubsan', '--tsan']
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install valkey-server and tools
         run: |
           sudo apt-get update -qq
@@ -141,7 +141,7 @@ jobs:
       matrix:
         san: ['--asan', '--ubsan']
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install valkey
         run: |
           brew install valkey
@@ -157,7 +157,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install tools
         run: |
           sudo apt-get update -qq
@@ -178,7 +178,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install valkey-server and tools
         run: |
           sudo apt-get update -qq
