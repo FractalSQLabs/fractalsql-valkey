@@ -29,7 +29,7 @@
  *      complete: no sticky last-applied value.
  *
  * WHO VALIDATES WHAT: the daemon parses and range-validates every config
- * file value LOUDLY (a bad t2s_max_attempts or think_num_ctx refuses the
+ * file value LOUDLY (a bad think_num_ctx refuses the
  * reload with a specific message), because a file edit is a deliberate
  * act; the environment path keeps today's silent clamp defaults, because
  * that is legacy behavior. The consumers' check_provider entry points do
@@ -71,9 +71,6 @@
 #define FSQL_PROV_THINK_PROVIDER      (1u << 8)
 #define FSQL_PROV_NATIVE_URL          (1u << 9)
 #define FSQL_PROV_NUM_CTX             (1u << 10)
-#define FSQL_PROV_T2S_MAX_ATTEMPTS    (1u << 11)
-#define FSQL_PROV_T2S_ALLOWED         (1u << 12)
-#define FSQL_PROV_T2S_USE_REVIEW      (1u << 13)
 #define FSQL_PROV_ENT_LIB             (1u << 14)
 #define FSQL_PROV_ENT_LEDGER_PATH     (1u << 15)
 #define FSQL_PROV_ENT_LEDGER_KEY      (1u << 16)
@@ -96,9 +93,6 @@ struct fsq_provider_cfg {
     const char *think_num_ctx_str;  /* decimal form of think_num_ctx: the bridge setenv()s a string */
     long        think_num_ctx;      /* daemon-validated (>= 1) */
 
-    long        t2s_max_attempts;   /* daemon-validated [1,10] */
-    const char *t2s_allowed_statements;  /* "select" | "select_insert_update" (daemon-validated) */
-    bool        t2s_use_review;
 
     const char *enterprise_lib;
     const char *enterprise_ledger_path;

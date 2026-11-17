@@ -40,12 +40,11 @@
  *   reasoning_allow_plaintext, enterprise_require_signature
  *       -- posture flags the operator set deliberately (plaintext
  *          transport, signature enforcement).
- *   think_provider, t2s_allowed_statements
+ *   think_provider
  *       -- routing / capability widening.
  *
  * WHAT A SESSION MAY OVERRIDE: the tuning keys -- the model names,
- * the THINK level, the THINK context size, the text-to-SQL attempt
- * count, and the text-to-SQL review switch. They change what the
+ * the THINK level and the THINK context size. They change what the
  * provider is asked for, not where the request goes.
  *
  * HOW THE OVERRIDE REACHES THE PLUGIN: the reasoning plugin reads its
@@ -56,9 +55,7 @@
  * the process environment. The tiers do exactly that: they fingerprint
  * the bridge environment (fractal_config_env_fingerprint) and reload
  * the tier's instance when the fingerprint no longer matches the one
- * the instance was loaded with. t2s_max_attempts and t2s_use_review
- * are read by this repo's own code on every call, so those two take
- * effect immediately.
+ * the instance was loaded with.
  *
  * THE COST OF THAT: the four tiers hold ONE plugin instance each, and
  * every session shares it. Two sessions that ask for different models
@@ -92,9 +89,6 @@ enum {
     FSQL_CFG_THINK_PROVIDER,
     FSQL_CFG_THINK_NATIVE_URL,
     FSQL_CFG_THINK_NUM_CTX,
-    FSQL_CFG_T2S_MAX_ATTEMPTS,
-    FSQL_CFG_T2S_ALLOWED_STATEMENTS,
-    FSQL_CFG_T2S_USE_REVIEW,
     FSQL_CFG_ENTERPRISE_LIB,
     FSQL_CFG_ENTERPRISE_LEDGER_PATH,
     FSQL_CFG_ENTERPRISE_LEDGER_KEY,

@@ -142,7 +142,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-ALL_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 30 31 32 33 34)
+ALL_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 30 31 32 33 34 35 36)
 MCP_GATES=(22 23 24 25 26 27 30 31)   # --gate mcp
 FUZZ_GATES=(21 29)                    # --fuzz
 QUICK_GATES=(01 02)
@@ -1199,6 +1199,7 @@ gate_24_mcp_https() {
   mcp_driver_gate 24 https mcp_https_smoke_client.py MCP_HTTPS_PORT="$(free_port)" MCP_HTTPS_CERT="$w/cert.pem" MCP_HTTPS_KEY="$w/key.pem"
 }
 gate_25_mcp_cli() { mcp_driver_gate 25 cli mcp_cli.py; }
+gate_36_mcp_audit_http() { mcp_driver_gate 36 audit_http mcp_audit_http.py; }   # origin check and repeated headers (SECURITY_AUDIT.md 3.17, 3.18)
 # 30 mcp_tls: the server's TLS connection to Valkey, against a TLS-terminating proxy in front of the plain server.
 gate_30_mcp_tls() {
   command -v openssl >/dev/null 2>&1 || { skip "30 mcp_tls (no openssl CLI for the throwaway certificates)"; return; }
@@ -1210,6 +1211,60 @@ gate_30_mcp_tls() {
 # length and a daemon that never answers can only be driven by a double. Every daemon command, the multimodal optimizers and every agent (through
 # gates 15 and 18's own call sequences) run under each failure; the server must answer every one. Also the module's load options for the daemon:
 # the ways a daemon-socket / daemon-key-file / daemon-timeout-s combination is refused.
+gate_35_frame_auth() {
+  # SECURITY_AUDIT.md 3.1, 3.9, 3.22 (ported from the Druid daemon). Frame authentication allocates nothing, so a forged
+  # all-zero-tag frame is refused even when the buffer it once allocated is made to fail; a payload declared but not sent is not
+  # allocated before the frame is authenticated; and a key under 16 bytes is refused at start-up.
+  local d key conf sock pid log hex i
+  [ "$(uname -s)" = Linux ] || { skip "35 frame_auth (needs LD_PRELOAD and /proc: Linux only)"; return; }
+  have_cc=$(command -v gcc || command -v cc)
+  [ -n "$have_cc" ] || { skip "35 frame_auth (no C compiler)"; return; }
+  [ -n "$PY" ] || { skip "35 frame_auth (no python3)"; return; }
+  d="$(mktemp -d /tmp/fsqa.XXXXXX)"; key="$d/k"; conf="$d/c.conf"; sock="$d/s"; log="$d/log"
+  "$have_cc" -shared -fPIC -O1 -o "$d/fs.so" tests/robustness/fail_size_preload.c -ldl 2>"$d/build.log" \
+    || { fail "35 frame_auth: the failure shim did not build"; rm -rf "$d"; return; }
+  openssl rand -hex 32 > "$key"; chmod 600 "$key"
+  printf 'socket_path = %s\nhmac_key_file = %s\nallowed_uids = %s\n' "$sock" "$key" "$(id -u)" > "$conf"; chmod 600 "$conf"
+  FSQL_FAIL_SIZE=$((32 + 777)) LD_PRELOAD="$d/fs.so" "$HERE/service/build/fractalsqld" -c "$conf" </dev/null >"$log" 2>&1 &
+  pid=$!
+  for i in $(seq 1 100); do [ -S "$sock" ] && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+  if "$PY" tests/robustness/frame_auth.py "$sock" "$key" "$pid" 777 >"$d/out" 2>&1; then
+    pass "35 frame_auth: forged frames refused, genuine answered, declared-but-unsent payloads not allocated"
+  else
+    sed 's/^/         /' "$d/out" | tail -8; fail "35 frame_auth: see the output above"
+  fi
+  kill "$pid" 2>/dev/null; { wait "$pid"; } 2>/dev/null
+  local bad=0
+  for hex in 00 0011223344556677 00112233445566778899aabbccddee; do
+    printf '%s\n' "$hex" > "$key"; rm -f "$sock"
+    if [ "$(KEYTRY=1 bash -c '"$0" -c "$1" </dev/null >/dev/null 2>&1 & p=$!; for i in $(seq 1 40); do [ -S "$2" ] && { echo start; kill $p; exit; }; kill -0 $p 2>/dev/null || { echo refuse; exit; }; sleep 0.05; done; echo timeout; kill $p' "$HERE/service/build/fractalsqld" "$conf" "$sock")" != refuse ]; then bad=$((bad + 1)); fi
+  done
+  if [ "$bad" -eq 0 ]; then pass "35 frame_auth: keys of 1, 8 and 15 bytes are refused at start-up"
+  else fail "35 frame_auth: $bad short key(s) were accepted"; fi
+  # SECURITY_AUDIT.md 3.12: without FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE the destructive ledger calls are refused (and logged); flush is not gated.
+  if true; then
+    printf '%s\n' "$(openssl rand -hex 32)" > "$key"; rm -f "$sock"
+    env -u FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE "$HERE/service/build/fractalsqld" -c "$conf" </dev/null >"$d/off.log" 2>&1 &
+    pid=$!
+    for i in $(seq 1 100); do [ -S "$sock" ] && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    "$PY" tests/destructive_calls.py "$sock" "$key"
+    kill "$pid" 2>/dev/null; { wait "$pid"; } 2>/dev/null
+    rm -f "$sock"
+    FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1 "$HERE/service/build/fractalsqld" -c "$conf" </dev/null >"$d/on.log" 2>&1 &
+    pid=$!
+    for i in $(seq 1 100); do [ -S "$sock" ] && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
+    "$PY" tests/destructive_calls.py "$sock" "$key" reset_only
+    kill "$pid" 2>/dev/null; { wait "$pid"; } 2>/dev/null
+    if grep -q "reset_hard refused: FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE" "$d/off.log" && ! grep -q "reset_hard refused" "$d/on.log" \
+       && ! grep -q "flush refused" "$d/off.log"; then
+      pass "35 frame_auth: reset_hard is refused (and logged) with the destructive switch off, not with it on; flush is never gated"
+    else
+      fail "35 frame_auth: the destructive switch did not behave: off log '$(tail -c 160 "$d/off.log" | tr '\n' ' ')'"
+    fi
+  fi
+  rm -rf "$d"
+}
+
 gate_33_fake_daemon() {
   local d="$TMPROOT/fake_daemon" key sock port pid log v bin
   mkdir -p "$d"; key="$d/key"; sock="$(short_tmp)/fd.sock"
@@ -1490,6 +1545,8 @@ if [ "$need_server" -eq 1 ]; then
         32) gate_32_plugin_sig_vendored ;;
         33) gate_33_fake_daemon ;;
         34) gate_34_session_params ;;
+        35) gate_35_frame_auth ;;
+        36) gate_36_mcp_audit_http ;;
       esac
     done
   fi

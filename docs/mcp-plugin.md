@@ -136,12 +136,13 @@ What the server answers at the JSON-RPC path:
 | A token that matches nothing | `401` with `WWW-Authenticate: Bearer realm="fractalsql-mcp", error="invalid_token"` |
 | A token whose policy entry has expired | `401` with the same `error="invalid_token"` challenge |
 | A token outside its own tool allowlist | The tool is not listed by `tools/list`, and a call to it is refused as a schema-class error: `tool 'X' is not permitted for this credential` |
-| A browser `Origin` header that is not a loopback origin and is not in `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check |
+| A browser `Origin` header that is not a loopback origin and is not in `FSQL_MCP_ALLOWED_ORIGINS` | `403`, checked **before** the token, so an unapproved origin never reaches the credential check; a loopback origin is `localhost`, `[::1]` or a literal address in `127.0.0.0/8` — a name that merely begins with `127.` is not one |
 | A chunked request body | `411` — send a `Content-Length` instead |
 | A declared `Content-Length` over 32 MiB | `413` |
 | A repeated `Content-Length`, or both `Content-Length` and `Transfer-Encoding` | `400` — the framing is ambiguous and is never resolved in favour of one reading |
+| A repeated `Host`, `Authorization`, `Origin`, `Content-Type` or `Mcp-*` header | `400` — two values for a header the server acts on are never resolved in favour of one |
 | A path the server does not serve | `404`, before the credential is looked at |
-| `GET /healthz` and `GET /readyz` | served without a token |
+| `GET /healthz` and `GET /readyz` | served without a token; `/readyz` runs its engine probe at most once every 5 seconds and answers the cached result in between |
 
 The comparison itself is constant-time, and the token is never written to a log line: the log lines identify the caller by a short digest, never by the
 token itself. Repeated failed authentications are slowed down (the wait grows by 100 ms per consecutive failure, up to two seconds), so a stolen-token
@@ -434,9 +435,9 @@ session but are not annotated destructive; the `Flags` column says which is whic
 | `fractal_ledger_shadow_count` | Entries in the shadow ledger. | read-only |
 | `fractal_ledger_flush` | Persist the ledger to its file. | **destructive** |
 | `fractal_ledger_load` | Load the persisted ledger into memory. | **destructive** |
-| `fractal_ledger_compact` | Compact the ledger. | **destructive** |
-| `fractal_ledger_reset_soft` | Clear the in-memory shadow state, keeping the truth ledger. | **destructive** |
-| `fractal_ledger_reset_hard` | Erase the ledger entirely. | **destructive** |
+| `fractal_ledger_compact` | Compact the ledger. Refused unless `FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1` is set for `fractalsqld`. | **destructive** |
+| `fractal_ledger_reset_soft` | Clear the in-memory shadow state, keeping the truth ledger. Refused unless `FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1` is set for `fractalsqld`. | **destructive** |
+| `fractal_ledger_reset_hard` | Erase the ledger entirely. Refused unless `FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1` is set for `fractalsqld`. | **destructive** |
 | `fractal_audit_log` | Append a record to the tamper-evident decision-audit chain (kind 2). | **destructive** |
 | `fractal_audit_unpack` | Decode a persisted audit blob (hex) into its JSON. | read-only |
 | `fractal_optimize_portfolio_multimodal` | Enterprise: several mutually different near-optimal portfolios. | read-only |

@@ -66,6 +66,11 @@
 #include "fractalsql_parse.h"   /* parse_vector_csv prototype (shared with fractalsql_vector.c) */
 #include "fractalsql_enterprise.h" /* fractal_enterprise_lib_loaded/fractal_ledger_write_kind2/_sha256 */
 
+/* The covariance matrix is n*n doubles: the asset count is bounded (8192 is 512 MiB of matrix) so that n*n and n*n*8 cannot wrap a
+ * size_t, whatever the input's length limits happen to be (SECURITY_AUDIT.md 3.15). */
+#define FSQ_MAX_ASSETS ((size_t) 8192)
+static inline int fsq_cov_cells_ok(size_t n_assets, size_t cov_n) { return n_assets <= FSQ_MAX_ASSETS && cov_n == n_assets * n_assets; }
+
 /* A SQL integer argument narrowed to int for a range check. Clamped, not
  * cast: a value past int range must stay out of range for the check that
  * follows, not wrap into it (4294967297 became 1 and passed). */
@@ -92,7 +97,7 @@ clamp_to_int(long long v)
  * VERSION from this same #define via sed. Keeping both readers on one
  * #define avoids the UDF's self-reported version and the package
  * metadata's version silently drifting apart. */
-#define FSQL_VERSION "2.0.11"
+#define FSQL_VERSION "2.0.2"
 
 /* strncasecmp is POSIX (<strings.h>), not standard C. Used by
  * fractal_feedback_report's kind-string parser below. */
@@ -1419,6 +1424,7 @@ portfolio_audit_log_best_effort(const double *mu, const double *cov,
     uint8_t hash[32];
     {
         size_t   mu_bytes  = n_assets * sizeof(double);
+        if (n_assets > FSQ_MAX_ASSETS) return;
         size_t   cov_bytes = n_assets * n_assets * sizeof(double);
         uint8_t *buf = (uint8_t *) malloc(mu_bytes + cov_bytes);
         if (buf == NULL) return;
@@ -1559,7 +1565,7 @@ fractal_optimize_portfolio(UDF_INIT *initid, UDF_ARGS *args, char *result,
     if (!parse_vector_csv(args->args[1], args->lengths[1], &cov, &cov_n, errbuf)) {
         free(mu); *error = 1; return NULL;
     }
-    if (cov_n != n_assets * n_assets) {
+    if (!fsq_cov_cells_ok(n_assets, cov_n)) {
         free(mu); free(cov); *error = 1; return NULL;
     }
     if (k <= 0 || (size_t) k > n_assets) {

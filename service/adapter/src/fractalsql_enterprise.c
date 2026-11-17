@@ -149,6 +149,11 @@
 #include <openssl/evp.h>         /* Ed25519 signature verification, see ent_verify_signature() */
 #include <openssl/crypto.h>      /* CRYPTO_memcmp: constant-time ledger MAC comparison */
 
+/* The covariance matrix is n*n doubles: the asset count is bounded (8192 is 512 MiB of matrix) so that n*n and n*n*8 cannot wrap a
+ * size_t, whatever the input's length limits happen to be (SECURITY_AUDIT.md 3.15). */
+#define FSQ_MAX_ASSETS ((size_t) 8192)
+static inline int fsq_cov_cells_ok(size_t n_assets, size_t cov_n) { return n_assets <= FSQ_MAX_ASSETS && cov_n == n_assets * n_assets; }
+
 /* Same stderr-mirroring SFS_INIT_ERROR as fractalsql_cognition.c
  * (duplicated per translation unit by this repo's established
  * precedent): on the UDF runtime path the formatted buffer would
@@ -2355,6 +2360,22 @@ ledger_verify_latest_file(uint32_t kind)
 /* fractal_ledger_flush/_compact/_reset_soft/_reset_hard                */
 /*   (session_id) -> INT (0)                                           */
 /* ------------------------------------------------------------------ */
+/* The destructive ledger operations (compact, reset_soft, reset_hard) refuse unless the operator has set
+ * FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1 in the environment of the process that hosts the ledger: a server nobody configured cannot
+ * have its audit chain destroyed by a command from any account that may call the function (SECURITY_AUDIT.md 3.12). flush is routine
+ * and is not gated. The one-way latch (fractal_lock_destructive) still wins. */
+static bool ent_destructive_allowed(void)
+{
+    const char *e = getenv("FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE");
+    return e != NULL && (strcmp(e, "1") == 0 || strcmp(e, "true") == 0 || strcmp(e, "yes") == 0 || strcmp(e, "on") == 0);
+}
+
+/* Every refusal is written to the server's log (stderr), so a destroyed or attempted-destroyed chain is never silent. */
+static void ent_destructive_refused(const char *fn)
+{
+    fprintf(stderr, "fractalsql: %s refused: FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE is not set in this server's environment\n", fn);
+}
+
 #define ENT_LEDGER_VOID_UDF(name, fnptr)                                              \
 FRACTAL_EXPORT bool                                                                    \
 name##_init(UDF_INIT *initid, UDF_ARGS *args, char *message)                           \
@@ -2379,6 +2400,10 @@ name(UDF_INIT *initid, UDF_ARGS *args, char *is_null, char *error)              
     /* builds refuse identically.                                          */          \
     if (fractal_session_destructive_locked(                                            \
             (unsigned long long) *(long long *) args->args[0])) { *error = 1; return 0; } \
+    if (strcmp(#name, "fractal_ledger_flush") != 0 && !ent_destructive_allowed()) {     \
+        ent_destructive_refused(#name);                                                \
+        *error = 1; return 0;                                                          \
+    }                                                                                   \
     if (!ensure_enterprise_lib()) { *error = 1; return 0; }                            \
     unsigned long long sid = (unsigned long long) *(long long *) args->args[0];        \
     fsql_ctx *ctx = fractal_session_acquire(sid);                                      \
@@ -3155,6 +3180,7 @@ portfolio_multimodal_audit_log_best_effort(const double *mu, const double *cov,
     unsigned char hash[32];
     {
         size_t mu_bytes  = n_assets * sizeof(double);
+        if (n_assets > FSQ_MAX_ASSETS) return;
         size_t cov_bytes = n_assets * n_assets * sizeof(double);
         unsigned char *buf = (unsigned char *) malloc(mu_bytes + cov_bytes);
         if (buf == NULL) return;
@@ -3294,7 +3320,7 @@ fractal_optimize_portfolio_multimodal(UDF_INIT *initid, UDF_ARGS *args, char *re
         *error = 1;
         return NULL;
     }
-    if (cov_n != n_assets * n_assets || k <= 0 || (size_t) k > n_assets) {
+    if (!fsq_cov_cells_ok(n_assets, cov_n) || k <= 0 || (size_t) k > n_assets) {
         free(mu);
         free(cov);
         *error = 1;
@@ -3496,7 +3522,7 @@ fractal_optimize_portfolio_multimodal_ex(UDF_INIT *initid, UDF_ARGS *args, char 
         *error = 1;
         return NULL;
     }
-    if (cov_n != n_assets * n_assets || k <= 0 || (size_t) k > n_assets) {
+    if (!fsq_cov_cells_ok(n_assets, cov_n) || k <= 0 || (size_t) k > n_assets) {
         free(mu);
         free(cov);
         *error = 1;
@@ -3598,6 +3624,7 @@ portfolio_multimodal_pareto_audit_log_best_effort(const double *mu, const double
     unsigned char hash[32];
     {
         size_t mu_bytes  = n_assets * sizeof(double);
+        if (n_assets > FSQ_MAX_ASSETS) return;
         size_t cov_bytes = n_assets * n_assets * sizeof(double);
         unsigned char *buf = (unsigned char *) malloc(mu_bytes + cov_bytes);
         if (buf == NULL) return;
@@ -3753,7 +3780,7 @@ fractal_optimize_portfolio_multimodal_pareto(UDF_INIT *initid, UDF_ARGS *args, c
         *error = 1;
         return NULL;
     }
-    if (cov_n != n_assets * n_assets || k <= 0 || (size_t) k > n_assets) {
+    if (!fsq_cov_cells_ok(n_assets, cov_n) || k <= 0 || (size_t) k > n_assets) {
         free(mu);
         free(cov);
         *error = 1;

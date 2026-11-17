@@ -201,9 +201,7 @@ that disconnects without deinitializing does not leak them.
   then, and a failure is named in the daemon log at that call. Removing a
   key reverts that setting to the boot-environment fallback on the next
   call. Validation is loud and named (unknown key: WARN naming the key;
-  `t2s_max_attempts` outside 1..10, `t2s_allowed_statements` not exactly
-  `select` or `select_insert_update`, `think_num_ctx` outside 1..10000000,
-  and empty
+  `think_num_ctx` outside 1..10000000, and empty
   values: refused). One exception: a change to `enterprise_lib` while an
   enterprise library is already loaded is refused (`ARGS` naming the
   loaded library); restart the daemon to change it.

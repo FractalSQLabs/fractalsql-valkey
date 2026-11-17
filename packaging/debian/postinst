@@ -10,7 +10,7 @@ case "$1" in
     configure)
         cat <<'EOF'
 
-fractalsql-valkey 2.0.1 installed.
+fractalsql-valkey 2.0.2 installed.
 
 The module is at:
     /usr/lib/valkey/modules/fractalsql.so

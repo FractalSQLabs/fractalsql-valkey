@@ -64,12 +64,6 @@ static const fsq_cfg_key g_keys[FSQL_CFG_KEY_COUNT] = {
     { "think_num_ctx",               FSQL_CFG_TYPE_INT,  1, 10000000, NULL,
       true,  false, "FSQL_REASONING_HTTP_NUM_CTX",
       FSQL_CFG_TIER_REASON | FSQL_CFG_TIER_T2S },
-    { "t2s_max_attempts",            FSQL_CFG_TYPE_INT,  1, 10, NULL,
-      true,  false, NULL, 0 },
-    { "t2s_allowed_statements",      FSQL_CFG_TYPE_ENUM, 0, 0,
-      "select|select_insert_update", false, false, NULL, 0 },
-    { "t2s_use_review",              FSQL_CFG_TYPE_BOOL, 0, 0, NULL,
-      true,  false, NULL, 0 },
     { "enterprise_lib",              FSQL_CFG_TYPE_PATH, 0, 0, NULL,
       false, false, NULL, 0 },
     { "enterprise_ledger_path",      FSQL_CFG_TYPE_PATH, 0, 0, NULL,
@@ -467,7 +461,6 @@ bool fractal_config_lookup_long(unsigned long long session_id, const char *name,
  * to keep the dependency one-way: the tiers know about the config
  * module, the config module only knows the tiers' accessor names. */
 int fractalsql_cognition_config_value(const char *name, char *out, size_t outcap);
-int fractalsql_textsql_config_value(const char *name, char *out, size_t outcap);
 int fractalsql_enterprise_config_value(const char *name, char *out, size_t outcap);
 
 int fractal_config_get_value(unsigned long long session_id, const char *name,
@@ -515,10 +508,6 @@ int fractal_config_get_value(unsigned long long session_id, const char *name,
     case FSQL_CFG_THINK_NATIVE_URL:
     case FSQL_CFG_THINK_NUM_CTX:
         return fractalsql_cognition_config_value(g_keys[key_id].key, out, outcap);
-    case FSQL_CFG_T2S_MAX_ATTEMPTS:
-    case FSQL_CFG_T2S_ALLOWED_STATEMENTS:
-    case FSQL_CFG_T2S_USE_REVIEW:
-        return fractalsql_textsql_config_value(g_keys[key_id].key, out, outcap);
     case FSQL_CFG_ENTERPRISE_LIB:
     case FSQL_CFG_ENTERPRISE_LEDGER_PATH:
     case FSQL_CFG_ENTERPRISE_LEDGER_KEY:

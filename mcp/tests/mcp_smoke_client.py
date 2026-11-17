@@ -237,7 +237,7 @@ def main():
     check("fractalsql://agents is a catalog of the sixteen recipes", len(json.loads(txt)["recipes"]) == 16)
     cfg = json.loads(s.call("resources/read", {"uri": "fractalsql://config"})["result"]["contents"][0]["text"])
     check("fractalsql://config reports the module version and that no daemon is attached",
-          cfg.get("module_version") == "2.0.1" and cfg.get("daemon_attached") is False and "password" not in json.dumps(cfg).lower(), cfg)
+          cfg.get("module_version") == "2.0.2" and cfg.get("daemon_attached") is False and "password" not in json.dumps(cfg).lower(), cfg)
     kinfo = json.loads(s.call("resources/read", {"uri": "fractalsql://key/mcpt%3Acorpus"})["result"]["contents"][0]["text"])
     check("fractalsql://key/{key} describes a corpus (160 float32 values)", kinfo.get("float32_values") == 160, kinfo)
     check("an unknown resource is an error", "error" in s.call("resources/read", {"uri": "fractalsql://nope"}))
@@ -264,7 +264,7 @@ def main():
     check("$/cancel: the cancelled call's real result is never delivered (it ends cancelled, or it had already finished)",
           not delivered_real or got is not None)
     e, sc = tool(s, "fractal_version", {})
-    check("a call after a cancel works (the connection came back)", not e and sc.get("module_version") == "2.0.1", sc)
+    check("a call after a cancel works (the connection came back)", not e and sc.get("module_version") == "2.0.2", sc)
 
     rc = s.close()
     check("the stdio server exits cleanly (rc 0) when its input ends", rc == 0, rc)

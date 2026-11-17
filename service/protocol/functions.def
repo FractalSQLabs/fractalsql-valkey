@@ -70,11 +70,8 @@ X(fractal_vector_hamming_distance, INT, r)
 /* Cognition */
 X(fractal_reason, STR, e)
 X(fractal_embed, STR, e)
-/* Text-to-SQL */
-X(fractal_t2s_config, STR, r)
+/* The model generate tier: FRACTAL.AGENT.DATA_ANALYST's question-to-query call. */
 X(fractal_t2s_generate, STR, e)
-X(fractal_t2s_review, STR, e)
-X(fractal_t2s_check_allowlist, STR, r)
 /* Per-session configuration overlay (fractalsql_config.h). The set /
  * reset pair mutates the daemon's per-session overlay, so it is
  * stateful; the reads are pure. */

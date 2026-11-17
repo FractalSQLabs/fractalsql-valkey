@@ -183,3 +183,18 @@ is refused while the setting is on. New releases only need a fresh signature fro
 
 For enterprise editions, licensing and support, contact FractalSQLabs.
 
+## Destructive ledger operations are off by default
+
+`fractal_ledger_compact`, `fractal_ledger_reset_soft` and `fractal_ledger_reset_hard` destroy ledger records, so they refuse unless the
+operator enables them by setting this in the environment of the `fractalsqld` process:
+
+```sh
+FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1
+```
+
+Without it, a server nobody configured cannot have its audit chain destroyed by a command from any account that may call the function.
+`fractal_ledger_flush` (sealing the ledgers into the chain) is routine and is not affected, and the one-way `fractal_lock_destructive`
+latch still wins when it is set. Each refusal is written to the server's log. Where the database has its own privileges, keep restricting
+who may execute these functions as well.
+
+This default changed: earlier builds allowed these operations unless the session was latched.

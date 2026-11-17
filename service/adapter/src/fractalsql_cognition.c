@@ -113,6 +113,7 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -211,7 +212,11 @@ str_out_ensure(str_out_ctx *so, size_t need)
     char  *nb;
     if (need <= so->cap) return true;
     ncap = so->cap ? so->cap : 256;
-    while (ncap < need) ncap *= 2;
+    while (ncap < need) {
+        /* doubling must not wrap (to 0, which never reaches need) (SECURITY_AUDIT.md 3.16) */
+        if (ncap > SIZE_MAX / 2) { ncap = need; break; }
+        ncap *= 2;
+    }
     nb = realloc(so->buf, ncap);
     if (nb == NULL) return false;
     so->buf = nb; so->cap = ncap;
@@ -1207,6 +1212,7 @@ fractal_reason(UDF_INIT *initid, UDF_ARGS *args, char *result,
     unsigned long ctx_json_len;
     bool    loaded = false;
     fsql_ctx *ctx;
+    char err_copy[SFS_DETAIL_MAX + 1];
     fsql_ai_response_t resp;
     int     rc;
     (void) result;
@@ -1258,9 +1264,18 @@ fractal_reason(UDF_INIT *initid, UDF_ARGS *args, char *result,
     }
     rc = fsql_dispatch_ai(ctx, args->args[1], args->lengths[1],
                           ctx_json, ctx_json_len, &resp);
+    /* The core writes its error message into the context, and the tier's
+     * context is shared by every connection that uses the tier: read the
+     * message while the tier's lock is still held, or the read races
+     * another thread's dispatch (ThreadSanitizer sees exactly that). */
+    err_copy[0] = '\0';
+    if (rc != FSQL_OK || resp.rc != 0) {
+        const char *e = fsql_last_error(ctx);
+        if (e) snprintf(err_copy, sizeof err_copy, "%s", e);
+    }
     load_unlock();
     if (rc != FSQL_OK || resp.rc != 0) {
-        const char *err = fsql_last_error(ctx);
+        const char *err = err_copy;
         char detail[SFS_DETAIL_MAX + sizeof SFS_DETAIL_MARK];
         sfs_detail_bounded(err && *err ? err : "(no detail)",
                            detail, sizeof detail);
@@ -1339,6 +1354,7 @@ fractal_embed(UDF_INIT *initid, UDF_ARGS *args, char *result,
     unsigned long long sid;
     bool    loaded = false;
     fsql_ctx *ctx;
+    char err_copy[SFS_DETAIL_MAX + 1];
     fsql_ai_response_t resp;
     int     rc;
     double *dv = NULL;
@@ -1390,11 +1406,20 @@ fractal_embed(UDF_INIT *initid, UDF_ARGS *args, char *result,
             *error = 1; return NULL;
         }
         rc = fsql_dispatch_ai(ctx, args->args[1], args->lengths[1], "{}", 2, &resp);
+    /* The core writes its error message into the context, and the tier's
+     * context is shared by every connection that uses the tier: read the
+     * message while the tier's lock is still held, or the read races
+     * another thread's dispatch (ThreadSanitizer sees exactly that). */
+        err_copy[0] = '\0';
+        if (rc != FSQL_OK || resp.rc != 0) {
+            const char *e = fsql_last_error(ctx);
+            if (e) snprintf(err_copy, sizeof err_copy, "%s", e);
+        }
         embed_env_close(saved);
         load_unlock();
     }
     if (rc != FSQL_OK || resp.rc != 0) {
-        const char *err = fsql_last_error(ctx);
+        const char *err = err_copy;
         char detail[SFS_DETAIL_MAX + sizeof SFS_DETAIL_MARK];
         sfs_detail_bounded(err && *err ? err : "(no detail)",
                            detail, sizeof detail);
