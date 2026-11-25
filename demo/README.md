@@ -46,6 +46,8 @@ configured.
 | `demo-agents` | A representative agent from each family, computed half only: triage, allocation, recall, recommendation, interception, the diversify proof. |
 | `demo-fractal-vector` | Every `FRACTAL.VECTOR.*` family: distances, arithmetic, text round trips, int8 and binary forms, and the cheap-filter-then-re-rank pattern. |
 | `demo-diversify` | Diversify/repulsion sessions: search, reject the top result, search again; two sessions given the same calls end in the same state. |
+| `demo-fractal-index` | The native IVF index: build one over a corpus, search it, check that its distances are the exact ones, watch it report a stale corpus, refresh, `FRACTAL.INDEX.ENSURE` and rebuild. |
+| `demo-chunking` | Long text, chunked: `FRACTAL.TEXT.CHUNK` splits documents, each passage is embedded and stored, `FRACTAL.INDEX.ENSURE` indexes them and `FRACTAL.RAG.AGENT` answers from the nearest passages. Needs a daemon with an embedding provider; says so and stops without one. |
 | `response-modes` | What `FRACTAL.REASON` hands back in `text`, `code` and `json` mode, and that embeddings do not depend on it. Needs a daemon. |
 | `enterprise-qtl-audit` | The tamper-evident ledger: append decisions, flush, verify the chain. Needs the enterprise library behind the daemon; reports "skipped" on a Community install. |
 

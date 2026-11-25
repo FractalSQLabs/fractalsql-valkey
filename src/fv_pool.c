@@ -45,12 +45,29 @@ void fv_sb_append(fv_sb *b, const char *z)
 
 void fv_sb_appendf(fv_sb *b, const char *fmt, ...)
 {
-    char tmp[512];
-    va_list ap;
+    /* The formatted result is measured first: a result that does not fit the stack
+     * buffer is formatted into a heap buffer instead of failing the whole document.
+     * (The 512-byte limit used to mark the buffer bad, so any JSON document over
+     * that size -- the index metadata, a reply with a population -- came out as
+     * "out of memory".) */
+    va_list ap, ap2;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof tmp, fmt, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
-    if (n < 0 || (size_t) n >= sizeof tmp) { b->bad = 1; return; }
+    if (n < 0) { va_end(ap2); b->bad = 1; return; }
+    if ((size_t) n >= 512) {
+        char *t = (char *) malloc((size_t) n + 1);
+        if (t == NULL) { va_end(ap2); b->bad = 1; return; }
+        vsnprintf(t, (size_t) n + 1, fmt, ap2);
+        va_end(ap2);
+        fv_sb_append(b, t);
+        free(t);
+        return;
+    }
+    char tmp[512];
+    vsnprintf(tmp, sizeof tmp, fmt, ap2);
+    va_end(ap2);
     fv_sb_append(b, tmp);
 }
 
@@ -353,6 +370,8 @@ void fv_job_int(fv_job *j, long long v) { j->kind = FV_R_INT; j->ires = v; }
 
 static int job_reply(RedisModuleCtx *ctx, fv_job *j)
 {
+    /* A job with its own reply hook builds the answer on the main thread (the index build writes its keys here). */
+    if (j->reply != NULL) return j->reply(ctx, j);
     switch (j->kind) {
     case FV_R_BULK:
         if (j->res == NULL) return fv_reply_err(ctx, "internal error: empty result");

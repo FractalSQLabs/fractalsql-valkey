@@ -52,7 +52,7 @@ typedef volatile int fsq_atomic_int;
 #  define FSQ_ATOMIC_GET(p)   __atomic_load_n((p), __ATOMIC_SEQ_CST)
 #  define FSQ_ATOMIC_SET(p,v) __atomic_store_n((p), (v), __ATOMIC_SEQ_CST)
 
-#define FSQL_DAEMON_VERSION     "2.0.2"
+#define FSQL_DAEMON_VERSION     "2.0.3"
 #define FSQ_CONFIG_ENV          "FRACTALSQL_CONFIG"
 #define FSQ_MAX_ALLOWED_UIDS    16
 #define FSQ_PEER_MAX            160

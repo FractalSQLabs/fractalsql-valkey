@@ -30,6 +30,9 @@ const fsql_storage_vfs_t *fractal_ledger_storage_vfs(void);
  * calls without duplicating the dlopen/dlsym machinery here. */
 bool fractal_enterprise_lib_loaded(void);
 
+/* Applies FRACTALSQL_LEDGER_RETENTION (fade | exact) to one context. true = applied (or nothing to apply); false = try again later. */
+bool fractal_enterprise_apply_retention(fsql_ctx *ctx);
+
 /* Append one kind=2 (general decision-audit chain) entry to the ledger,
  * a second, independent append-only chain alongside kind=1's QTL blobs,
  * same hash-chain/CSV-mirror guarantees, queryable via

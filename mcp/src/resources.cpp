@@ -65,7 +65,7 @@ namespace fsqlmcp
         "    {\"tool\": \"fractal_agent_outlier_intercept\", \"use\": \"Block a proposed state that is too close to a known-bad one.\", \"model\": true},\n"
         "    {\"tool\": \"fractal_agent_recall_hybrid\", \"use\": \"Retrieve the nearest memories, optionally within a cohort.\", \"model\": false},\n"
         "    {\"tool\": \"fractal_agent_recommend_diverse\", \"use\": \"Recommend items that are relevant and mutually diverse.\", \"model\": false},\n"
-        "    {\"tool\": \"fractal_agent_data_analyst\", \"use\": \"Ask a natural-language question of a valkey-search index.\", \"model\": true},\n"
+        "    {\"tool\": \"fractal_agent_data_analyst\", \"use\": \"Ask a natural-language question of your hashes (valkey-search index or key prefix).\", \"model\": true},\n"
         "    {\"tool\": \"fractal_agent_patient_deterioration_triage\", \"use\": \"Cohort search plus the drift from baseline to now.\", \"model\": true},\n"
         "    {\"tool\": \"fractal_agent_feedback_audit\", \"use\": \"Check that diversification is actually working.\", \"model\": false},\n"
         "    {\"tool\": \"fractal_agent_schedule_workload\", \"use\": \"Place a workload on the nearest-capability node.\", \"model\": true},\n"

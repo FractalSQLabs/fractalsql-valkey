@@ -229,8 +229,10 @@ def phase_atrest(r, a):
     with open(ledger, "rb") as f:
         chain_bytes = f.read()
     recs_in_chain = chain_records(ledger)
-    r.check("the chain holds the three appended records",
-            len(recs_in_chain) == 3, str(recs_in_chain))
+    # the real core's flush adds a record of the QTL chain (kind 1); the mock core writes none, so the chain holds the audit records only
+    n_flush = 1 if os.environ.get("FSQL_ENT_KIND", "real") == "real" else 0
+    r.check("the chain holds the appended records (%d)" % (2 + n_flush),
+            len(recs_in_chain) == 2 + n_flush, str(recs_in_chain))
     if recs_in_chain:
         cut = recs_in_chain[-1][0]
         with open(ledger, "r+b") as f:
@@ -246,19 +248,19 @@ def phase_atrest(r, a):
 
     # --- the anchor log ---
     lines = anchor_lines(a.daemon_log)
-    r.check("one anchor-log line per append", len(lines) == 3, str(lines))
+    r.check("one anchor-log line per append", len(lines) == 2 + n_flush, str(lines))
     kinds = [x.get("kind") for x in lines]
     r.check("the anchor log names the chain kind of each append",
-            kinds == [1, 2, 2], str(kinds))
+            kinds == ([1, 2, 2] if n_flush else [2, 2]), str(kinds))
     mirror = csv_rows(csv_path)
     newest = {}
     for row in mirror:
         newest[row["kind"]] = row
     r.check("the anchor log's hash is the newest entry hash of that chain",
-            len(lines) == 3 and newest.get(2, {}).get("entry") == lines[-1].get("hash"),
+            len(lines) == 2 + n_flush and newest.get(2, {}).get("entry") == lines[-1].get("hash"),
             "csv=%s anchor=%s" % (newest.get(2, {}).get("entry"), lines[-1].get("hash") if lines else None))
     r.check("the anchor log counts the rows of that chain",
-            len(lines) == 3 and lines[-1].get("rows") == 2, str(lines))
+            len(lines) == 2 + n_flush and lines[-1].get("rows") == 2, str(lines))
     r.check("the anchor log's hash is lowercase hex",
             all(re.match(r"^[0-9a-f]{64}$", str(x.get("hash", ""))) for x in lines), str(lines))
 

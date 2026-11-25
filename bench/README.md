@@ -24,6 +24,21 @@ It reports three things against a server that has the module loaded:
 It reports; it does not pass or fail, and the docs quote no numbers, because they depend on
 your hardware, your corpus and your Valkey version. Run it on yours.
 
+## Index and precision benchmarks
+
+| Script | What it does |
+| --- | --- |
+| `index_head_to_head.py` | The native IVF index against the exact scan on the same corpus: recall@k, the median latency, the bytes of index per row, the build seconds and the rows the index scanned. |
+| `precision_agreement.py` | The precision contract: the module's distances against the sequential double reference, bit for bit. |
+
+```bash
+python3 bench/index_head_to_head.py --port 6379
+python3 bench/precision_agreement.py --port 6379 --dims 128,768
+```
+
+Both need a server with the module loaded and nothing else. `precision_agreement.py` prints `RESULT: PASS` when every
+distance is bit-identical to the sequential double reference; `index_head_to_head.py` reports, it does not pass or fail.
+
 ## The other scripts
 
 | Script | What it does |
@@ -31,7 +46,7 @@ your hardware, your corpus and your Valkey version. Run it on yours.
 | `scale_sweep.sh` | Runs `bench.py` across a list of corpus sizes, one at a time (`--sizes "1000 5000 20000" --dim 64`), so you can see how cost grows with rows x dimension. |
 | `data_gen.py` | Loads a clustered corpus into a key (`--n`, `--dim`, `--clusters`) plus a companion hash of cluster ids, for the benchmarks and for trying commands by hand. `--delete` removes it. |
 | `vector_type_head_to_head.py` | The storage question: the same rows as a packed float32 blob and as text, compared on memory (`MEMORY USAGE`) and on the cost of `FRACTAL.VECTOR.FROMTEXT`. |
-| `head_to_head.py` | valkey-search's HNSW index against Scout (below). |
+| `head_to_head.py` | valkey-search's HNSW index, the native IVF index, the exact scan and Scout, on one dataset (below). |
 
 ```bash
 bench/scale_sweep.sh --port 6379 --dim 64 --sizes "1000 5000 20000"
@@ -48,30 +63,35 @@ python3 bench/vector_type_head_to_head.py --port 6379 --n 2000 --dim 128
 - `SEARCH` ranks by cosine distance. A brute-force scan that ranks by Euclidean distance is a
   different question and will not return the same rows.
 
-## Head to head: valkey-search HNSW vs Scout
+## Head to head: valkey-search HNSW, the native IVF index, the exact scan and Scout
 
-`head_to_head.py` compares valkey-search's HNSW index with Scout
-over one clustered dataset, asking both the same question. valkey-search's HNSW index answers
-a nearest-neighbour query quickly and tends to return neighbours from the query's own
-cluster. `FRACTAL.EXPLORE` scans the corpus key on every call and disperses a population
-across distinct basins, so it covers more clusters and costs more time. They solve different
-problems; the script reports the trade-off and does not declare a winner.
+`head_to_head.py` runs one clustered dataset through four methods and asks each the same question:
+
+- **valkey-search HNSW**: a separate module with its own index. It answers a nearest-neighbour query quickly and tends to return neighbours from the query's own cluster. Optional (`--no-hnsw` skips it).
+- **FractalSQL IVF** (`FRACTAL.INDEX.CREATE`, then `FRACTAL.SEARCH ... INDEX`): the native index. It probes a few cells and verifies every candidate, so the distances are exact; only which rows are examined is approximate. The script reports its **recall against the exact scan**, so the approximation is a measured number.
+- **FractalSQL exact** (`FRACTAL.SEARCH ... USE_INDEX 0`): scans every row. It is the reference the index's recall is computed against.
+- **Scout** (`FRACTAL.EXPLORE`): scans the corpus key on every call and disperses a population across distinct basins, so it covers more clusters and costs more time.
+
+They solve different problems; the script reports the trade-offs and does not declare a winner.
 
 ```bash
 docker compose --profile search up -d          # valkey-bundle (search, json, ...) + fractalsql.so
 python3 bench/head_to_head.py --port 16380     # defaults: 10,000 x 128, 50 clusters, 5 queries
 docker compose --profile search down
+
+python3 bench/head_to_head.py --port 6379 --no-hnsw     # the plain Valkey service: IVF, exact and Scout only
 ```
 
-Needs numpy and a server with both `fractalsql` and `search` loaded; it checks and says so
+Needs numpy and a server with `fractalsql` loaded (and `search` too, unless you pass `--no-hnsw`); it checks and says so
 if not. FractalSQL does not depend on valkey-search: the default Compose service is plain
-Valkey plus this module. The `search` profile exists only for this benchmark and the
+Valkey plus this module. The `search` profile exists only for the HNSW column of this benchmark and the
 composition examples.
 
-- The default size is small. Scout's cost grows with rows x dimension, so raise `--n` gradually, and avoid a machine
+- The default size is small. Scout's and the exact scan's cost grow with rows x dimension, so raise `--n` gradually, and avoid a machine
   that other work shares.
-- "recall" in the table is the number of distinct clusters a method's answer covers, not nearest-neighbour recall against ground truth.
-- The script creates only `hh:*` keys and one `hh_idx` index, and removes them when it ends.
+- The IVF index is built as FP32 by default (`--ivf-format`). INT8 and INT4 codes are 4x to 8x smaller, but they keep only a PCA projection of each vector, and on tight synthetic clusters like this dataset's that can lose the within-cluster structure the ranking needs: the build's own calibration then reports that it did not reach its recall target, and the script says so. `RERANK` (a larger exact-verified shortlist) is the other way to buy recall back.
+- "clust" in the table is the number of distinct clusters a method's answer covers. "recall" is the IVF index's overlap with the exact scan's top-K (1.00 means it returned the same rows), not a statement about HNSW.
+- The script creates only `hh:*` keys, one `hh_idx` valkey-search index and one `hh_ivf` FractalSQL index, and removes them when it ends.
 - Numbers are not quoted here: they depend on your hardware, corpus and Valkey version, so run it on yours. The pattern to
-  expect: HNSW returns about one cluster in a few milliseconds, and Scout returns
+  expect: HNSW and the IVF index return about one cluster in a few milliseconds (the IVF index at a recall near its calibrated target, about 0.95 by default), the exact scan is slower than both, and Scout returns
   several clusters in more time.

@@ -181,11 +181,13 @@ docker compose exec valkey valkey-cli FLUSHALL          # the demos leave only k
 ## Running next to valkey-search and valkey-json (optional)
 
 FractalSQL needs neither. The default `valkey` service is the official Valkey image with this
-module mounted, and everything in this guide works on it. If you also want an indexed
-nearest-neighbour search or JSON documents beside it (for example to run
-`bench/head_to_head.py`, or to narrow a large collection with `FT.SEARCH` and then run
-`FRACTAL.EXPLORE` on the candidates), start the `search` profile, which uses the official
-`valkey/valkey-bundle` image:
+module mounted, and everything in this guide works on it, including nearest-neighbour search at
+scale (build a native IVF index with `FRACTAL.INDEX.CREATE`) and `FRACTAL.AGENT.DATA_ANALYST`,
+which scans a key prefix when valkey-search is not loaded. If you also want valkey-search's own
+secondary indexes, filters or full-text search, or JSON documents, beside it (for example to run
+`bench/head_to_head.py`, to have `DATA_ANALYST` query an index instead of scanning, or to narrow a
+large collection with `FT.SEARCH` and then run `FRACTAL.EXPLORE` on the candidates), start the
+`search` profile, which uses the official `valkey/valkey-bundle` image:
 
 ```bash
 docker compose --profile search up -d     # port 16380; modules: search, json, bloom, ldap, fractalsql

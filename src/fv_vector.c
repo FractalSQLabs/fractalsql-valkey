@@ -19,6 +19,7 @@
  *   FRACTAL.VECTOR.TOTEXT                          a        -> "[1,2,3]"
  */
 #include "fv_common.h"
+#include "fsql_precision.h"
 
 #define ERRSZ 256
 
@@ -53,28 +54,29 @@ core_failed(RedisModuleCtx *ctx, const char *fn, int rc)
     return fv_reply_err(ctx, m);
 }
 
-typedef int (*dist2_fn)(const float *, const float *, size_t, float *);
+typedef double (*dist2_fn)(const float *, const float *, size_t);
 
+/* The SQL-visible distances come from the ONE shared implementation (fsql_precision.h): the sums accumulate in double in a
+ * fixed sequential order and the result is returned as a double (no rounding to float32 on the way out), so every host agrees
+ * bit for bit. */
 static int
-binary_double(RedisModuleCtx *ctx, RedisModuleString **argv, int argc, dist2_fn fn, const char *name)
+binary_double(RedisModuleCtx *ctx, RedisModuleString **argv, int argc, dist2_fn fn)
 {
     if (argc != 3) return RedisModule_WrongArity(ctx);
     float *a, *b; size_t dim;
     if (two_vectors(ctx, argv, &a, &b, &dim) != 0) return REDISMODULE_OK;
-    float out = 0;
-    int rc = fn(a, b, dim, &out);
+    double out = fn(a, b, dim);
     free(a); free(b);
-    if (rc != 0) return core_failed(ctx, name, rc);
-    return RedisModule_ReplyWithDouble(ctx, (double) out);
+    return RedisModule_ReplyWithDouble(ctx, out);
 }
 
 #define BIN_DOUBLE(CMD, FN) \
-    static int CMD(RedisModuleCtx *c, RedisModuleString **v, int n) { return binary_double(c, v, n, FN, #FN); }
-BIN_DOUBLE(Dot_Cmd,    fsql_vector_dot)
-BIN_DOUBLE(L2_Cmd,     fsql_vector_l2)
-BIN_DOUBLE(L2sq_Cmd,   fsql_vector_l2_sq)
-BIN_DOUBLE(Cosd_Cmd,   fsql_vector_cosine_distance)
-BIN_DOUBLE(Coss_Cmd,   fsql_vector_cosine_similarity)
+    static int CMD(RedisModuleCtx *c, RedisModuleString **v, int n) { return binary_double(c, v, n, FN); }
+BIN_DOUBLE(Dot_Cmd,    fsqlp_dot_f)
+BIN_DOUBLE(L2_Cmd,     fsqlp_l2_f)
+BIN_DOUBLE(L2sq_Cmd,   fsqlp_l2_sq_f)
+BIN_DOUBLE(Cosd_Cmd,   fsqlp_cosine_distance_f)
+BIN_DOUBLE(Coss_Cmd,   fsqlp_cosine_similarity_f)
 
 static int
 binary_blob(RedisModuleCtx *ctx, RedisModuleString **argv, int argc,
@@ -103,10 +105,9 @@ Norm_Cmd(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     char err[ERRSZ]; float *a; size_t n;
     if (fv_blob_to_floats(argv[1], "a", FV_MAX_BLOB_BYTES, &a, &n, err, sizeof err) != 0)
         return fv_reply_err(ctx, err);
-    float out = 0;
-    int rc = fsql_vector_norm(a, n, &out);
+    double out = fsqlp_norm_f(a, n);
     free(a);
-    return rc != 0 ? core_failed(ctx, "fsql_vector_norm", rc) : RedisModule_ReplyWithDouble(ctx, (double) out);
+    return RedisModule_ReplyWithDouble(ctx, out);
 }
 
 static int
@@ -276,16 +277,18 @@ fv_parse_vector_text(const char *t, size_t len, float **out, size_t *n_out,
 
     while (msg[0] == '\0') {
         char *end;
-        double d = strtod(p, &end);
+        /* strtof rounds the decimal straight to float32, which is what the corpus and the query blobs hold: the text round
+         * trip (%.9g) is then bit-identical. Going through a double first would round twice. */
+        float d = strtof(p, &end);
         if (end == p)                        { snprintf(msg, sizeof msg, "invalid number near '%.16s'", p); break; }
         if (!isfinite(d))                    { snprintf(msg, sizeof msg, "non-finite vector element near '%.16s'", p); break; }
-        if (fabs(d) > 3.4028234663852886e38) { snprintf(msg, sizeof msg, "value out of range near '%.16s'", p); break; }
+        if (fabs((double) d) > 3.4028234663852886e38) { snprintf(msg, sizeof msg, "value out of range near '%.16s'", p); break; }
         if (n == cap) {
             float *nv = (float *) realloc(v, cap * 2 * sizeof(float));
             if (nv == NULL) { snprintf(msg, sizeof msg, "out of memory"); break; }
             v = nv; cap *= 2;
         }
-        v[n++] = (float) d;
+        v[n++] = d;
         p = skip_ws(end);
         if (*p != ',') break;
         p = skip_ws(p + 1);

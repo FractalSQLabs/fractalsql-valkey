@@ -541,16 +541,6 @@ fv_daemon_embed(const char *text, double **vec, size_t *n, char *err, size_t err
  * and _pareto). The enterprise library lives only in the daemon, so a Community daemon answers
  * NULL and this reports "enterprise tier not loaded". mu is n values, cov n x n, both sent as
  * text. On success *out is the daemon's JSON ({"n_found":N,"candidates":[...]}), malloc'd. */
-static char *
-csv_of(const double *v, size_t n)
-{
-    char *s = (char *) malloc(n * 16 + 4), *o;
-    if (s == NULL) return NULL;
-    o = s;
-    for (size_t i = 0; i < n; i++) o += sprintf(o, "%s%.9g", i ? "," : "", v[i]);   /* 9 digits round-trip a float32 */
-    *o = '\0';
-    return s;
-}
 
 int
 fv_daemon_multimodal(int pareto, const double *mu, const double *cov, size_t n, long long k, long long restarts,
@@ -558,7 +548,7 @@ fv_daemon_multimodal(int pareto, const double *mu, const double *cov, size_t n, 
                      char **out, size_t *out_len, char *err, size_t errsz)
 {
     if (!g_configured) { snprintf(err, errsz, "the fractalsqld daemon is not configured"); return -1; }
-    char *mus = csv_of(mu, n), *covs = csv_of(cov, n * n);
+    char *mus = fv_csv_of(mu, n), *covs = fv_csv_of(cov, n * n);
     if (mus == NULL || covs == NULL) { free(mus); free(covs); snprintf(err, errsz, "out of memory"); return -1; }
     fv_darg a[9];
     memset(a, 0, sizeof a);
@@ -808,7 +798,7 @@ daemon_command(RedisModuleCtx *ctx, RedisModuleString **argv, int argc, const dc
                 /* Attribute the audit entry. The payload gets an "_actor" block (the Valkey client id
                  * and ACL user, both server-assigned) spliced INSIDE its value; the daemon's {"type","entry"}
                  * chain shape is unchanged. A caller-supplied "_actor" key is refused so it cannot forge one. */
-                if (memmem(p, l, "\"_actor\"", 8) != NULL) {
+                if (fv_contains(p, l, "\"_actor\"", 8)) {
                     dcmd_dispose(&j->base);
                     return fv_reply_err(ctx, "the payload may not contain the reserved key \"_actor\"");
                 }

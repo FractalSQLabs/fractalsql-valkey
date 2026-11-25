@@ -396,7 +396,7 @@ namespace fsqlmcp
             inFlight = inflightIds_.count( requestId ) != 0;
             // An id in flight is always remembered; one that is not (a cancel racing a finished call, or never issued) only
             // while the set is small: the completion path is the one place an entry is erased, so an unbounded set would
-            // grow for the life of the process (SECURITY_AUDIT.md 3.8).
+            // grow for the life of the process.
             if( inFlight || cancelledIds_.size() < 1024 ) cancelledIds_.insert( requestId );
         }
         // Race-safe by construction: a cancel racing an already-finished call

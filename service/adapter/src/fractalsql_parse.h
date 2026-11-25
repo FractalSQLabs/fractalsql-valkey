@@ -32,6 +32,19 @@ extern "C" {
 bool parse_vector_csv(const char *src, size_t srclen,
                       double **out, size_t *n_out, char *errmsg);
 
+/* Parses an embedding reply -- the model provider's own JSON array of
+ * numbers -- into a newly malloc'd double array (caller frees *out).
+ * The reply must hold an array: '[' then the numbers then ']'; what
+ * follows the closing bracket is ignored. A reply with no array at all,
+ * an empty array, a malformed element or a non-finite element is
+ * refused. This is the shape the other hosts parse the same reply in
+ * (fsql_parse_embedding_array in the SQLite, PostgreSQL and DuckDB
+ * columns), so every host answers the same way. On failure, writes a
+ * human-readable message into errmsg (caller-allocated, >=
+ * FSQL_ERRMSG_SIZE bytes) and returns false. */
+bool parse_embedding_array(const char *src, size_t srclen,
+                           double **out, size_t *n_out, char *errmsg);
+
 /* Parses fractal_search's corpus argument: rows separated by ';' or (in
  * bracketed-JSON mode) by top-level '[', each row parsed via
  * parse_vector_csv. expected_dim of 0 means "infer from the first row";

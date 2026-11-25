@@ -99,7 +99,7 @@ inline void fsqlCloseAfterReply( int fd, int lingerMs )
 namespace fsqlmcp
 {
     // A header the server acts on that arrives twice is refused: two values for the host, the credential, the origin or the
-    // framing are an ambiguity a proxy in front and this parser could resolve differently (SECURITY_AUDIT.md 3.18).
+    // framing are an ambiguity a proxy in front and this parser could resolve differently.
     static bool isSingleValuedHeader( const std::string& name )
     {
         static const char* const kNames[] = { "host", "authorization", "origin", "content-type", "transfer-encoding",
@@ -784,7 +784,7 @@ namespace fsqlmcp
     }
 
     // True for an IPv4 address in 127.0.0.0/8, parsed as an address: a name that merely starts with "127." (127.evil.example,
-    // 127.0.0.1.nip.io) is not one (SECURITY_AUDIT.md 3.17).
+    // 127.0.0.1.nip.io) is not one.
     static bool isLoopbackV4( const std::string& host )
     {
         in_addr addr{};
@@ -1356,7 +1356,7 @@ namespace fsqlmcp
         if( req.path == "/readyz" )
         {
             // This route is unauthenticated and the probe is a live query: the result is kept for 5 s so a burst of requests
-            // costs the engine one probe, not one each (SECURITY_AUDIT.md 3.14).
+            // costs the engine one probe, not one each.
             static std::mutex probeMu;
             static std::chrono::steady_clock::time_point probedAt{};
             static bool probed = false, lastReady = false;

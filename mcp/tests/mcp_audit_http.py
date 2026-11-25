@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
-"""The HTTP transport's handling of lookalike origins and repeated headers (SECURITY_AUDIT.md 3.17, 3.18).
+"""The HTTP transport's handling of lookalike origins and repeated headers.
 
 usage: mcp_audit_http.py [MCP_BINARY]   (default: $MCP_SERVER_EXE, as the other MCP drivers)
 No engine is needed: the checks are answered before any call reaches it.
@@ -76,14 +76,26 @@ proc = subprocess.Popen([binary, "--http", str(port)], stdin=subprocess.DEVNULL,
                         stderr=open(os.path.join(scratch, "log"), "wb"), env=env, cwd=scratch)
 try:
     up = False
-    for _ in range(100):
+    # Wait for the listener, up to 60 s (a freshly written binary can be scanned before it first runs, notably on Windows), but stop
+    # as soon as the process has exited: nothing will ever answer then.
+    deadline = time.time() + 60
+    while time.time() < deadline and proc.poll() is None:
         try:
             socket.create_connection(("127.0.0.1", port), 0.3).close()
             up = True
             break
         except OSError:
             time.sleep(0.05)
-    check("the server starts", up)
+    detail = ""
+    if not up:
+        try:
+            with open(os.path.join(scratch, "log"), "rb") as lf:
+                tail = lf.read()[-300:].decode("utf-8", "replace").replace("\n", " | ")
+        except OSError:
+            tail = ""
+        detail = "exit=%s port=%d log=%s" % (proc.poll(), port, tail)
+        print("  " + detail)
+    check("the server starts", up, detail)
     if up:
         for origin in ("http://127.evil.example", "http://127.0.0.1.evil.example", "http://127.0.0.1.nip.io:80",
                        "http://localhost.evil.example", "http://128.0.0.1", "http://1270.0.0.1"):

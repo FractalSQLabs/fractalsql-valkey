@@ -38,9 +38,9 @@ namespace fsqlmcp
           { {"memory_key","Customer-memory corpus key.",true}, {"catalog_key","Catalog corpus key.",true}, {"query","The customer's profile vector.",true} },
           "Call fractal_agent_recall_hybrid(corpus_key={memory_key}, query={query}) for the history, then "
           "fractal_agent_recommend_diverse(catalog_key={catalog_key}, query={query})." },
-        { "ask_my_data", "Ask a natural-language question of a valkey-search index.",
-          { {"index","The valkey-search index name.",true}, {"question","Natural-language question.",true} },
-          "Call fractal_agent_data_analyst(index={index}, question={question}). It needs valkey-search and a model." },
+        { "ask_my_data", "Ask a natural-language question of your hashes (a valkey-search index, or a key prefix when valkey-search is not loaded).",
+          { {"index","The valkey-search index name, or the key prefix to scan.",true}, {"question","Natural-language question.",true} },
+          "Call fractal_agent_data_analyst(index={index}, question={question}). It uses valkey-search when loaded, otherwise scans the keys under the prefix; it needs a model." },
         { "diversity_audit", "Self-contained diversify health-check cycle.",
           { {"catalog_key","Catalog corpus key.",true}, {"warmup_key","Warmup corpus key.",true}, {"query","The audited query vector.",true} },
           "Call fractal_agent_feedback_audit(catalog_key={catalog_key}, warmup_key={warmup_key}, query={query})." },

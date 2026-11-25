@@ -540,6 +540,9 @@ namespace
         else if( args.contains( "population_size" ) )
             cmd.push_back( std::to_string( args.at( "population_size" ).get<long long>() ) );
         if( args.contains( "session" ) ) { cmd.push_back( "SESSION" ); cmd.push_back( args.at( "session" ).get<std::string>() ); }
+        if( args.contains( "index" ) ) { cmd.push_back( "INDEX" ); cmd.push_back( args.at( "index" ).get<std::string>() ); }
+        if( args.contains( "nprobe" ) ) { cmd.push_back( "NPROBE" ); cmd.push_back( std::to_string( args.at( "nprobe" ).get<long long>() ) ); }
+        if( args.contains( "ids" ) ) { cmd.push_back( "IDS" ); cmd.push_back( args.at( "ids" ).get<std::string>() ); }
         return decodeReply( db.call( cmd ), Out::Auto );
     }
 
@@ -694,6 +697,11 @@ namespace
                 // The searches read a corpus and write nothing.
                 { "fractal_search",                     true,  false, false },
                 { "fractal_search_explore",             true,  false, false },
+                // The index tools: info reads the index, the three management commands write it.
+                { "fractal_index_create",               false, true,  false },
+                { "fractal_index_rebuild",              false, true,  false },
+                { "fractal_index_drop",                 false, true,  false },
+                { "fractal_index_info",                 true,  false, false },
             };
             auto tool = [ & ]( const char* name, const char* cat, const char* cmd, ToolClass cls, const char* desc, std::vector<Prm> params,
                                bool ro = true, int destructive = -1, bool openWorld = false, Out out = Out::Auto )
@@ -717,7 +725,12 @@ namespace
                 "Returns best_point, best_fit and top_k as [{idx, dist}].",
                 { Key( "corpus_key", "A stored corpus key." ).O(), Mat( "corpus", "An inline corpus: an array of equal-length rows." ).O(),
                   Vec( "query", "The query vector; its length is the corpus dimension." ),
-                  Int( "k", "How many rows to return." ).O( 5 ), Str( "session", kSession ).KW( "SESSION" ) },
+                  Int( "k", "How many rows to return." ).O( 5 ), Str( "session", kSession ).KW( "SESSION" ),
+                  Str( "index", "The IVF index to search (fractal_index_create builds one). The distances are still exact: "
+                               "every candidate is verified against the corpus." ).KW( "INDEX" ),
+                  Int( "nprobe", "How many index cells to probe (the default is the calibrated one)." ).KW( "NPROBE" ),
+                  Str( "ids", "Restrict the search to these corpus positions: comma-separated, or a JSON array as text. A set of at most 4096 "
+                              "positions is scanned exactly; a longer one goes through the index and is filtered. An empty list returns no rows." ).KW( "IDS" ) },
                 false, 0 );
               x.custom = []( Db& db, const Tool& t, const Json& a, CallCtx& ) { return searchHandler( db, t, a ); }; add( std::move( x ) ); }
             { Tool x = tool( "fractal_search_explore", "discovery", "FRACTAL.EXPLORE", E,
@@ -728,6 +741,85 @@ namespace
                   Str( "session", kSession ).KW( "SESSION" ) },
                 false, 0 );
               x.custom = []( Db& db, const Tool& t, const Json& a, CallCtx& ) { return searchHandler( db, t, a ); }; add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_create", "discovery", "FRACTAL.INDEX.CREATE", E,
+                "Build the native IVF index of a corpus key: a k-means partition with INT8, INT4, FP16 or FP32 codes. "
+                "The build writes ordinary string keys beside the corpus (one per cell, a metadata key and a generation "
+                "pointer), so they persist and replicate like any other key. Needs the dimension of the corpus.",
+                { Key( "corpus_key", "The corpus key to index." ), Str( "name", "The index name (a plain identifier)." ),
+                  Int( "dim", "The corpus dimension (the row width in float32 values)." ).KW( "DIM" ),
+                  Str( "vector_format", "The code format: INT8 (the default), INT4, FP16 or FP32." ).KW( "VECTOR_FORMAT" ),
+                  Int( "nlist", "How many cells (0 = sqrt(rows))." ).KW( "NLIST" ),
+                  Int( "pca_dim", "The PCA basis size for INT8 and INT4 (0 = dim/4)." ).KW( "PCA_DIM" ),
+                  Int( "iters", "The k-means iterations (0 = 6)." ).KW( "ITERS" ),
+                  Int( "sample", "The training sample size (0 = 50000)." ).KW( "SAMPLE" ),
+                  Int( "seed", "The k-means seed (0 = 1)." ).KW( "SEED" ) },
+                false, 1 );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_rebuild", "discovery", "FRACTAL.INDEX.REBUILD", E,
+                "Rebuild an index from the current corpus: a new generation is written and the pointer is flipped, so a "
+                "reader only ever sees a complete generation.",
+                { Key( "corpus_key", "The corpus key to index." ), Str( "name", "The index name." ),
+                  Int( "dim", "The corpus dimension." ).KW( "DIM" ),
+                  Str( "vector_format", "The code format: INT8, INT4, FP16 or FP32." ).KW( "VECTOR_FORMAT" ),
+                  Int( "nlist", "How many cells (0 = sqrt(rows))." ).KW( "NLIST" ),
+                  Int( "pca_dim", "The PCA basis size for INT8 and INT4 (0 = dim/4)." ).KW( "PCA_DIM" ),
+                  Int( "iters", "The k-means iterations (0 = 6)." ).KW( "ITERS" ),
+                  Int( "sample", "The training sample size (0 = 50000)." ).KW( "SAMPLE" ),
+                  Int( "seed", "The k-means seed (0 = 1)." ).KW( "SEED" ) },
+                false, 1 );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_drop", "discovery", "FRACTAL.INDEX.DROP", E,
+                "Drop an index: the cells, the metadata and the generation pointer are removed.",
+                { Key( "corpus_key", "The corpus key the index belongs to." ), Str( "name", "The index name." ) },
+                false, 1 );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_info", "discovery", "FRACTAL.INDEX.INFO", C,
+                "Describe an index: its status (ready, stale, degraded, empty or orphaned) with advice on what to do next (refresh or rebuild), "
+                "its format and sizes, the rows added since the build, the calibration and the statistics of the last search (the rows the index scanned).",
+                { Key( "corpus_key", "The corpus key the index belongs to." ), Str( "name", "The index name." ) } );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_candidates", "discovery", "FRACTAL.INDEX.CANDIDATES", C,
+                "The corpus positions a Scout pass should look at: the rows of the nearest cells of an index, nearest first, plus the rows added after the "
+                "build. A shortlist, not an answer: the distances are not computed here.",
+                { Key( "corpus_key", "The corpus key the index belongs to." ), Vec( "query", "The query vector; its length is the corpus dimension." ),
+                  Str( "index", "The index name." ),
+                  Int( "k", "How many positions to return." ).O(),
+                  Int( "nprobe", "How many index cells to probe (the default is the calibrated one)." ).KW( "NPROBE" ),
+                  Int( "rerank", "How many candidates to keep before the final order." ).KW( "RERANK" ) } );
+              x.custom = []( Db& db, const Tool& t, const Json& a, CallCtx& )
+              {
+                  std::vector<std::string> cmd{ t.command, a.at( "corpus_key" ).get<std::string>(), packVec( a.at( "query" ), "query" ),
+                                                "INDEX", a.at( "index" ).get<std::string>() };
+                  if( a.contains( "k" ) ) cmd.push_back( std::to_string( a.at( "k" ).get<long long>() ) );
+                  if( a.contains( "nprobe" ) ) { cmd.push_back( "NPROBE" ); cmd.push_back( std::to_string( a.at( "nprobe" ).get<long long>() ) ); }
+                  if( a.contains( "rerank" ) ) { cmd.push_back( "RERANK" ); cmd.push_back( std::to_string( a.at( "rerank" ).get<long long>() ) ); }
+                  return decodeReply( db.call( cmd ), Out::Auto );
+              };
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_list", "discovery", "FRACTAL.INDEX.LIST", C,
+                "List the indexes of a corpus key, each with its format, dimension, rows indexed, rows now, status (ready, stale, degraded, empty or orphaned) and generation.",
+                { Key( "corpus_key", "The corpus key whose indexes to list." ) } );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_refresh", "discovery", "FRACTAL.INDEX.REFRESH", E,
+                "Fold the rows appended to a corpus since the build into the index's cells, without retraining: a new generation is written and the "
+                "pointer is flipped. Rewritten or removed rows need fractal_index_rebuild; fractal_index_info says which one it advises.",
+                { Key( "corpus_key", "The corpus key the index belongs to." ), Str( "name", "The index name." ) },
+                false, 1 );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_index_ensure", "discovery", "FRACTAL.INDEX.ENSURE", E,
+                "Bring an index up to date with the least work and say what was done: create it when it does not exist, refresh it when up to a "
+                "quarter of its rows were appended since the build, rebuild it when more were added or rows were rewritten or removed, and "
+                "leave it alone when it is current. The reply names the action (created, refreshed, rebuilt or unchanged), the status, the generation and the rows.",
+                { Key( "corpus_key", "The corpus key to index." ), Str( "name", "The index name (a plain identifier)." ),
+                  Int( "dim", "The corpus dimension (the row width in float32 values)." ).KW( "DIM" ),
+                  Str( "vector_format", "The code format for a create or rebuild: INT8 (the default), INT4, FP16 or FP32." ).KW( "VECTOR_FORMAT" ),
+                  Int( "nlist", "How many cells (0 = sqrt(rows))." ).KW( "NLIST" ),
+                  Int( "pca_dim", "The PCA basis size for INT8 and INT4 (0 = dim/4)." ).KW( "PCA_DIM" ),
+                  Int( "iters", "The k-means iterations (0 = 6)." ).KW( "ITERS" ),
+                  Int( "sample", "The training sample size (0 = 50000)." ).KW( "SAMPLE" ),
+                  Int( "seed", "The k-means seed (0 = 1)." ).KW( "SEED" ) },
+                false, 1 );
+              add( std::move( x ) ); }
             add( tool( "fractal_diversify_enable", "discovery", "FRACTAL.DIVERSIFY.ENABLE", C,
                 "Start (or reset) a diversify session: later searches given the same session avoid the neighbourhoods it has been told to reject.",
                 { Key( "session", kOwnSession ).Ctx() }, false ) );
@@ -764,6 +856,7 @@ namespace
                 add( tool( name, "agency", cmd, E, desc, std::move( ps ), ro, false, llm ) );
             };
             const char* kIds = "Optional hash key mapping row index to a row id.";
+            const char* kIdx = "Optional: the name of the IVF index to search through (when the server was loaded with agent-use-index); an error if no such index exists on the key.";
             const char* kContent = "Optional hash key mapping row index to its content.";
             const char* kCtx = "Optional JSON object handed to the reasoner as context.";
             agent( "fractal_agent_anomaly_triage", "FRACTAL.AGENT.ANOMALY_TRIAGE",
@@ -776,25 +869,29 @@ namespace
             agent( "fractal_agent_route_task", "FRACTAL.AGENT.ROUTE_TASK",
                 "Route a task to the nearest capability under a token budget, with a written justification.",
                 { Key( "capability_key", "Corpus key, one capability embedding per row." ), Vec( "task", "The task embedding." ),
-                  Int( "budget", "Tokens available." ), Int( "cost_per_route", "Tokens spent per routing." ).KW( "COST_PER_ROUTE" ).O( 150 ), Key( "ids", kIds ).KW( "IDS" ) } );
+                  Int( "budget", "Tokens available." ), Int( "cost_per_route", "Tokens spent per routing." ).KW( "COST_PER_ROUTE" ).O( 150 ), Key( "ids", kIds ).KW( "IDS" ), Str( "index", kIdx ).KW( "INDEX" ) } );
             agent( "fractal_agent_outlier_intercept", "FRACTAL.AGENT.OUTLIER_INTERCEPT",
                 "Intercept a proposed state that is too close to a known-bad one. Returns intercepted, the nearest distance and a reason.",
                 { Key( "history_key", "Corpus key of known-bad states." ), Vec( "state", "The proposed state." ),
                   Num( "threshold", "Intercept when the nearest distance is below this." ),
-                  Str( "metric", "cosine compares shape, l2 compares magnitude too." ).KW( "METRIC" ).O( "cosine" ).OneOf( { "cosine", "l2" } ) } );
+                  Str( "metric", "cosine compares shape, l2 compares magnitude too." ).KW( "METRIC" ).O( "cosine" ).OneOf( { "cosine", "l2" } ),
+                  Str( "index", kIdx ).KW( "INDEX" ) } );
             agent( "fractal_agent_recall_hybrid", "FRACTAL.AGENT.RECALL_HYBRID",
                 "Pure retrieval, no model: the K nearest memories to a query, optionally restricted to a cohort.",
                 { Key( "corpus_key", "Corpus key." ), Vec( "query", "The query vector." ), Int( "k", "How many." ).KW( "K" ).O( 5 ),
                   Key( "ids", kIds ).KW( "IDS" ), Key( "content", kContent ).KW( "CONTENT" ),
-                  Filter( "filter", "Cohort restriction: {hash, value} keeps rows whose entry in that hash equals value." ).KW( "FILTER" ) }, false );
+                  Filter( "filter", "Cohort restriction: {hash, value} keeps rows whose entry in that hash equals value." ).KW( "FILTER" ),
+                  Str( "index", kIdx ).KW( "INDEX" ) }, false );
             agent( "fractal_agent_recommend_diverse", "FRACTAL.AGENT.RECOMMEND_DIVERSE",
                 "Pure retrieval, no model: K recommendations that are relevant and mutually diverse.",
                 { Key( "catalog_key", "Catalog corpus key." ), Vec( "query", "The query vector." ), Int( "k", "How many." ).KW( "K" ).O( 10 ), Key( "ids", kIds ).KW( "IDS" ) }, false );
             agent( "fractal_agent_data_analyst", "FRACTAL.AGENT.DATA_ANALYST",
-                "Natural-language question over a valkey-search index: the model writes a query, the module validates and runs it under YOUR ACL, and the model analyses the rows. Needs valkey-search and a model.",
-                { Str( "index", "The valkey-search index name." ), Str( "question", "The question (1 to 4096 bytes)." ),
+                "Natural-language question over hashes: the model writes a filter, the module validates and runs it under YOUR ACL, and the model analyses the rows. Uses a valkey-search index when it is loaded, otherwise scans the keys under a prefix. Needs a model.",
+                { Str( "index", "The valkey-search index name (in scan mode: the key prefix, unless prefix is given)." ), Str( "question", "The question (1 to 4096 bytes)." ),
                   Int( "max_attempts", "Correction attempts (1 to 5)." ).KW( "MAX_ATTEMPTS" ), Int( "limit", "Most rows returned (1 to 100)." ).KW( "LIMIT" ),
-                  JsonText( "context", kCtx ).KW( "CONTEXT" ) } );
+                  JsonText( "context", kCtx ).KW( "CONTEXT" ),
+                  Str( "mode", "auto uses valkey-search when it is loaded and scans otherwise; search requires valkey-search; scan never uses it." ).KW( "MODE" ).O( "auto" ).OneOf( { "auto", "search", "scan" } ),
+                  Str( "prefix", "Scan mode: the key prefix to scan (letters, digits and _ : . -, up to 128 bytes). Giving it selects scan mode." ).KW( "PREFIX" ) } );
             agent( "fractal_agent_patient_deterioration_triage", "FRACTAL.AGENT.PATIENT_DETERIORATION_TRIAGE",
                 "Cohort search plus the drift from baseline to current, then a written triage. Returns cohort_matches, a projected trajectory and a summary.",
                 { Key( "corpus_key", "The cohort corpus." ), Vec( "query", "The entity's current profile." ), Vec( "baseline", "Intake vector." ),
@@ -808,7 +905,7 @@ namespace
                 "Place a workload on the nearest node by capability vector, with a written justification and confidence.",
                 { Key( "node_key", "Corpus key of node capability vectors." ), Vec( "task", "The workload requirement vector." ),
                   Int( "iterations", "Search iterations." ).KW( "ITERATIONS" ).O( 30 ), Int( "population", "Search population." ).KW( "POPULATION" ).O( 50 ),
-                  JsonText( "context", kCtx ).KW( "CONTEXT" ), Key( "ids", kIds ).KW( "IDS" ) } );
+                  JsonText( "context", kCtx ).KW( "CONTEXT" ), Key( "ids", kIds ).KW( "IDS" ), Str( "index", kIdx ).KW( "INDEX" ) } );
             agent( "fractal_agent_rebalance_sibling", "FRACTAL.AGENT.REBALANCE_SIBLING",
                 "Optimise a portfolio, find the most similar past allocation by weight change, and explain the rebalance.",
                 { Key( "alloc_key", "Corpus key of past allocations, one weight vector per row." ), Vec( "mu", "Expected returns." ),
@@ -840,7 +937,8 @@ namespace
             agent( "fractal_agent_plan_explore", "FRACTAL.AGENT.PLAN_EXPLORE",
                 "Embed a seed state and branch it into the nearest strategies. Needs an embedding provider.",
                 { Key( "strategy_key", "Corpus key of strategy embeddings." ), Str( "state_text", "The seed state, text." ),
-                  Int( "dim", "The corpus dimension (must equal the embedding width)." ), Int( "max_branches", "How many branches (1 to 100000)." ) } );
+                  Int( "dim", "The corpus dimension (must equal the embedding width)." ), Int( "max_branches", "How many branches (1 to 100000)." ),
+                  Str( "index", kIdx ).KW( "INDEX" ) } );
             agent( "fractal_agent_trajectory_predict", "FRACTAL.AGENT.TRAJECTORY_PREDICT",
                 "Project the next state from a time-ordered state log: the drift since a baseline row, applied to the current state. No model.",
                 { Key( "corpus_key", "Key of dim-wide state rows in time order; the last row is current." ), Int( "dim", "The row width." ),
@@ -854,15 +952,20 @@ namespace
                 "Embed a question, search the corpus, and answer from the hits. Needs an embedding provider and a model.",
                 { Key( "corpus_key", "Corpus key." ), Str( "query_text", "The question." ), Int( "dim", "Corpus dimension (must equal the embedding width)." ),
                   Int( "population", "Search population." ).KW( "POPULATION" ), Int( "iterations", "Search iterations." ).KW( "ITERATIONS" ),
-                  Key( "content", kContent ).KW( "CONTENT" ), Key( "ids", kIds ).KW( "IDS" ) } );
+                  Key( "content", kContent ).KW( "CONTENT" ), Key( "ids", kIds ).KW( "IDS" ), Str( "index", kIdx ).KW( "INDEX" ) } );
             agent( "fractal_rag_agent", "FRACTAL.RAG.AGENT",
-                "Retrieval-augmented answer: search_agent with a fixed search. Returns the answer, source_doc_ids and timing.",
+                "Retrieval-augmented answer: search_agent with a fixed search. Returns the answer, source_row_ids (the rows' ids: the IDS hash values when given, else the row indexes) and timing.",
                 { Key( "corpus_key", "Corpus key." ), Str( "query_text", "The question." ), Int( "dim", "Corpus dimension." ),
-                  Key( "content", kContent ).KW( "CONTENT" ), Key( "ids", kIds ).KW( "IDS" ) } );
+                  Key( "content", kContent ).KW( "CONTENT" ), Key( "ids", kIds ).KW( "IDS" ), Str( "index", kIdx ).KW( "INDEX" ) } );
 
             // ---- analytics ----
             auto an = [ & ]( const char* name, const char* cmd, const char* desc, std::vector<Prm> ps, Out out = Out::Auto, ToolClass cls = ToolClass::Cheap )
             { add( tool( name, "analytics", cmd, cls, desc, std::move( ps ), true, false, false, out ) ); };
+            an( "fractal_sfs_converge", "FRACTAL.SFS.CONVERGE", "The table-free CONVERGENCE function: Stochastic Fractal Search toward the query direction, answering "
+                "{dim, population_size, best_point, best_fit}. It reads no key and is not a retrieval command (the indexed search is fractal_search with an index).",
+                { Vec( "query", "The query vector." ), Int( "iterations", "SFS iterations (1 to 10000)." ).KW( "ITERATIONS" ).O( 30 ),
+                  Int( "population_size", "SFS population (2 to 10000)." ).KW( "POPULATION" ).O( 50 ),
+                  Int( "diffusion_factor", "SFS diffusion factor (1 to 100)." ).KW( "DIFFUSION" ).O( 2 ) } );
             an( "fractal_dimension_dfa", "FRACTAL.DIM.DFA", "Detrended fluctuation analysis exponent of a series: about 0.5 for noise, above 1 for persistent trends.",
                 { Vec( "series", "The series, at least a few dozen samples." ) }, Out::Number );
             an( "fractal_dimension_drift", "FRACTAL.DIM.DRIFT", "Regime drift: the DFA exponent of the recent window against the baseline before it.",
@@ -871,6 +974,10 @@ namespace
                 { Mat( "points", "Points as equal-length rows." ), DimOf( "points" ) } );
             an( "fractal_periodogram", "FRACTAL.SERIES.PERIODOGRAM", "Dominant frequencies of a series: the strongest spectral peaks.",
                 { Vec( "series", "The series." ), Int( "max_peaks", "Most peaks to return." ).O( 8 ) } );
+            an( "fractal_chunk_text", "FRACTAL.TEXT.CHUNK", "Split text into chunks of at most chunk_size characters (code points): a JSON array of {no, start, end, text}; start and end are character offsets, end exclusive. "
+                "chunk_mode paragraph (default) packs whole paragraphs, sentence packs whole sentences, fixed cuts every chunk_size - chunk_overlap characters; a paragraph or sentence longer than chunk_size is cut with chunk_overlap shared. Pure: no model, the same output on every FractalSQL host.",
+                { Str( "text", "The text to split." ), Int( "chunk_size", "Largest chunk in characters, 1 to 100000." ), Int( "chunk_overlap", "Characters shared by neighbouring pieces when a paragraph or sentence has to be cut, 0 to chunk_size - 1." ).O( 0 ),
+                  Str( "chunk_mode", "paragraph, sentence or fixed." ).O( "paragraph" ) } );
             an( "fractal_change_point_detect", "FRACTAL.SERIES.CHANGEPOINT", "Indices where the series' behaviour changes.",
                 { Vec( "series", "The series." ), Int( "window", "Comparison window." ), Num( "threshold", "Sensitivity." ).O( 2.0 ), Int( "max_points", "Most indices to return." ).O( 16 ) } );
             an( "fractal_state_fingerprint", "FRACTAL.SERIES.FINGERPRINT", "A compact bit fingerprint of a vector (random-hyperplane hash); returns hex bytes.",
@@ -894,9 +1001,52 @@ namespace
                 { Vec( "mu", "Expected returns." ), Mat( "cov", "The n x n covariance matrix." ), Int( "k", "At most this many assets." ),
                   Int( "seed", "Repeatability." ).O(), Bool( "use_obl", "Opposition-based learning per trial (off by default)." ).O( false ),
                   Str( "diffusion_mode", "gaussian or levy." ).O( "gaussian" ).OneOf( { "gaussian", "levy" } ) }, Out::Auto, ToolClass::Expensive );
+            an( "fractal_optimize_subset", "FRACTAL.OPTIMIZE.SUBSET", "Value-weighted k-subset allocation: maximise sum(weight x item_value) with at most k items weighted, each weight at most its upper bound, the weights summing to 1. prev_weights and turnover_penalty steer the search away from reallocating (rebalancing). Answers {score, weights}.",
+                { Vec( "item_values", "What each item is worth." ), Vec( "upper_bounds", "The most weight each item may take, 0 to 1." ), Int( "k", "At most this many items carry weight." ),
+                  Vec( "prev_weights", "The current weights, for rebalancing." ).KW( "PREV" ).O(), Num( "turnover_penalty", "Cost of changing a weight from prev_weights (0 or more)." ).KW( "TURNOVER" ).O(),
+                  Int( "seed", "Repeatability." ).KW( "SEED" ).O() }, Out::Auto, ToolClass::Expensive );
+            // the named feature store: a hash of doc_id -> vector
+            { Tool x = tool( "fractal_store_morphology", "analytics", "FRACTAL.FEATURE.STORE", C,
+                "Upserts a feature vector against a doc_id in a hash key (the generic per-item feature store); the last write wins. Returns OK.",
+                { Key( "key", "The hash that holds the feature store." ), Int( "doc_id", "The feature-store key, 0 or more." ),
+                  Vec( "feature_array", "The feature vector." ) },
+                false );
+              add( std::move( x ) ); }
+            { Tool x = tool( "fractal_mine_topology_negatives", "analytics", "FRACTAL.FEATURE.MINE", C,
+                "Brute-force k-NN (true Euclidean, ascending) over the feature store hash. Returns [{'doc_id','distance'}], nearest first. A stored vector "
+                "of another dimension is skipped, not an error.",
+                { Key( "key", "The hash that holds the feature store." ), Vec( "surrogate_vector", "The query vector." ), Int( "k", "Neighbors to return." ) } );
+              add( std::move( x ) ); }
             // vector math
             auto vm = [ & ]( const char* name, const char* cmd, const char* desc, std::vector<Prm> ps, Out out )
             { add( tool( name, "analytics", cmd, C, desc, std::move( ps ), true, false, false, out ) ); };
+            vm( "fractal_vector_from_text", "FRACTAL.VECTOR.FROMTEXT",
+                "Parses a vector from text -- a JSON array, or a comma-separated list of numbers -- into the canonical vector.",
+                { Str( "vector", "The vector as text." ) }, Out::Vector );
+            vm( "fractal_vector_to_json", "FRACTAL.VECTOR.TOTEXT",
+                "Renders a vector as JSON: the array of numbers, so a client can see exactly what the engine holds.",
+                { Vec( "vector", "The vector." ) }, Out::Auto );
+            vm( "fractal_vector_norm", "FRACTAL.VECTOR.NORM", "The vector's L2 norm (its magnitude).",
+                { Vec( "v", "The vector." ) }, Out::Number );
+            vm( "fractal_vector_normalize", "FRACTAL.VECTOR.NORMALIZE",
+                "The vector scaled to unit length, so a distance between two vectors reflects direction only.",
+                { Vec( "v", "The vector." ) }, Out::Vector );
+            vm( "fractal_vector_add", "FRACTAL.VECTOR.ADD", "The element-wise sum of two vectors.",
+                { Vec( "a", "The first vector." ), Vec( "b", "The second vector." ) }, Out::Vector );
+            vm( "fractal_vector_sub", "FRACTAL.VECTOR.SUB", "The element-wise difference of two vectors.",
+                { Vec( "a", "The first vector." ), Vec( "b", "The second vector." ) }, Out::Vector );
+            vm( "fractal_vector_scale", "FRACTAL.VECTOR.SCALE", "The vector multiplied by a scalar factor.",
+                { Vec( "v", "The vector." ), Num( "s", "The factor to scale by." ) }, Out::Vector );
+            vm( "fractal_vector_l2_distance", "FRACTAL.VECTOR.L2", "The L2 (Euclidean) distance between two vectors.",
+                { Vec( "a", "The first vector." ), Vec( "b", "The second vector." ) }, Out::Number );
+            vm( "fractal_vector_l2_squared", "FRACTAL.VECTOR.L2SQ", "The squared L2 distance: the same measure without the square root.",
+                { Vec( "a", "The first vector." ), Vec( "b", "The second vector." ) }, Out::Number );
+            vm( "fractal_vector_cosine_distance", "FRACTAL.VECTOR.COSINE",
+                "The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal.",
+                { Vec( "a", "The first vector." ), Vec( "b", "The second vector." ) }, Out::Number );
+            vm( "fractal_vector_cosine_similarity", "FRACTAL.VECTOR.SIMILARITY",
+                "The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal.",
+                { Vec( "a", "The first vector." ), Vec( "b", "The second vector." ) }, Out::Number );
             vm( "fractal_vector_lp_distance", "FRACTAL.VECTOR.LP", "Minkowski L_p distance.", { Vec( "a", "First vector." ), Vec( "b", "Second vector." ), Num( "p", "The exponent, above 0." ) }, Out::Number );
             vm( "fractal_vector_hamming_distance", "FRACTAL.VECTOR.HAMMING", "Differing bits between two equal-length binary strings (hex).", { Hex( "a", "First, hex." ), Hex( "b", "Second, hex." ) }, Out::Number );
             vm( "fractal_vector_quantize_int8", "FRACTAL.VECTOR.QUANTIZE.INT8", "Scalar int8 quantisation: returns scale and codes (4x smaller).", { Vec( "vector", "The vector." ) }, Out::Auto );

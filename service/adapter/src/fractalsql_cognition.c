@@ -122,7 +122,7 @@
 #include "fractalsql.h"              /* FSQL_OK, fsql_last_error */
 #include "fractalsql_sql.h"          /* fsql_ctx, fsql_dispatch_ai, fsql_load_reasoning */
 #include "fractalsql_session.h"      /* fractal_session_acquire_reason/_embed, ... */
-#include "fractalsql_parse.h"        /* parse_vector_csv (shared with fractalsql.c) */
+#include "fractalsql_parse.h"        /* parse_vector_csv, parse_embedding_array (shared with fractalsql.c) */
 #include "fractalsql_provider.h"     /* fractalsql_cognition_{check,apply}_provider */
 #include "fractalsql_config.h"       /* the per-session configuration overlay */
 #include "fv_plugin_verify.h"        /* the reasoning plugin's authenticity gate */
@@ -213,7 +213,7 @@ str_out_ensure(str_out_ctx *so, size_t need)
     if (need <= so->cap) return true;
     ncap = so->cap ? so->cap : 256;
     while (ncap < need) {
-        /* doubling must not wrap (to 0, which never reaches need) (SECURITY_AUDIT.md 3.16) */
+        /* doubling must not wrap (to 0, which never reaches need) */
         if (ncap > SIZE_MAX / 2) { ncap = need; break; }
         ncap *= 2;
     }
@@ -1450,11 +1450,16 @@ fractal_embed(UDF_INIT *initid, UDF_ARGS *args, char *result,
         *error = 1; return NULL;
     }
 
-    /* parse_vector_csv takes an explicit length, not requiring NUL
-     * termination, so resp.summary can be handed to it directly, no
-     * copy needed (mirrors fractal_vector_dims's own direct-parse of
-     * args->args[0]/args->lengths[0]). */
-    if (!parse_vector_csv(resp.summary, resp.summary_len, &dv, &n, errbuf)) {
+    /* The embedding reply is the provider's own JSON array of numbers,
+     * so it is parsed as one: parse_embedding_array takes an explicit
+     * length, not requiring NUL termination, so resp.summary can be
+     * handed to it directly, no copy needed (mirrors
+     * fractal_vector_dims's own direct-parse of
+     * args->args[0]/args->lengths[0]). The other hosts parse the same
+     * reply the same way (fsql_parse_embedding_array in the SQLite,
+     * PostgreSQL and DuckDB columns), so the daemon answers the way
+     * they do. */
+    if (!parse_embedding_array(resp.summary, resp.summary_len, &dv, &n, errbuf)) {
         fsql_ai_response_free(&resp);
         fractal_session_release_tier();
         *error = 1; return NULL;

@@ -8,6 +8,7 @@
  *
  * Commands (see the per-file headers for the argument lists):
  *   fv_search.c     FRACTAL.SEARCH, FRACTAL.EXPLORE
+ *   fv_index.c      FRACTAL.INDEX.CREATE, FRACTAL.INDEX.REBUILD, FRACTAL.INDEX.REFRESH, FRACTAL.INDEX.DROP, FRACTAL.INDEX.INFO, FRACTAL.INDEX.LIST
  *   fv_vector.c     FRACTAL.VECTOR.*
  *   fv_analytics.c  FRACTAL.DIM.*, FRACTAL.SERIES.*, FRACTAL.CYCLE.DETECT,
  *                   FRACTAL.TDA.PERSISTENCE, FRACTAL.OPTIMIZE.PORTFOLIO,
@@ -77,7 +78,8 @@ RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
         return REDISMODULE_ERR;
 
     long long threads = 4, inflight_mb = 1024, daemon_timeout = 60, max_sessions = 64, session_ttl = 3600;
-    int agent_partial = 0;
+    int agent_partial = 0, agent_use_index = 0;
+    long long agent_index_min_rows = 10000;
     char daemon_sock[256] = "", daemon_key[512] = "";
     for (int i = 0; i < argc; i += 2) {
         size_t l;
@@ -133,6 +135,20 @@ RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
                 RedisModule_Log(ctx, "warning", "fractalsql: agent-partial-reasoning-fail must be yes or no");
                 return REDISMODULE_ERR;
             }
+        } else if (l == 15 && strncasecmp(k, "agent-use-index", 15) == 0) {
+            size_t vl; const char *v = RedisModule_StringPtrLen(argv[i + 1], &vl);
+            if (vl == 3 && strncasecmp(v, "yes", 3) == 0) agent_use_index = 1;
+            else if (vl == 2 && strncasecmp(v, "no", 2) == 0) agent_use_index = 0;
+            else if (vl == 4 && strncasecmp(v, "auto", 4) == 0) agent_use_index = 2;
+            else {
+                RedisModule_Log(ctx, "warning", "fractalsql: agent-use-index must be yes, no or auto");
+                return REDISMODULE_ERR;
+            }
+        } else if (l == 20 && strncasecmp(k, "agent-index-min-rows", 20) == 0) {
+            if (parse_int_arg(argv[i + 1], 0, 2000000, &agent_index_min_rows) != 0) {
+                RedisModule_Log(ctx, "warning", "fractalsql: agent-index-min-rows must be an integer in [0, 2000000]");
+                return REDISMODULE_ERR;
+            }
         } else {
             RedisModule_Log(ctx, "warning", "fractalsql: unknown option '%.32s'", k);
             return REDISMODULE_ERR;
@@ -152,7 +168,7 @@ RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
         }
     }
 
-    fv_agents_configure(agent_partial);
+    fv_agents_configure(agent_partial, agent_use_index, (int) agent_index_min_rows);
     fv_session_configure((int) max_sessions, (int) session_ttl);
     if (fv_pool_start((int) threads, (size_t) inflight_mb * 1024u * 1024u) != 0) {
         RedisModule_Log(ctx, "warning", "fractalsql: could not start the worker pool");
@@ -165,6 +181,8 @@ RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
         fv_register_daemon(ctx) == REDISMODULE_ERR ||
         fv_register_agents(ctx) == REDISMODULE_ERR ||
         fv_register_session(ctx) == REDISMODULE_ERR ||
+        fv_register_index(ctx) == REDISMODULE_ERR ||
+        fv_register_feature(ctx) == REDISMODULE_ERR ||
 #ifdef FV_OOM_INJECT
         fv_register_oom(ctx) == REDISMODULE_ERR ||
 #endif

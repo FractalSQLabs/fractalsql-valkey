@@ -24,8 +24,11 @@
  */
 
 /* Search and discovery */
+X(fractal_sfs_converge, STR, r)
+/* The old name is NOT an alias: it is registered so that a call fails with a message that names the new function. */
 X(fractal_search, STR, r)
 X(fractal_search_explore, STR, r)
+X(fractal_sfs_converge_debug, STR, r)
 X(fractal_search_debug, STR, r)
 /* Dimension, analytics, and informational */
 X(fractal_version, STR, r)

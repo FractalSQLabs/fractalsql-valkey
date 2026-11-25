@@ -95,12 +95,28 @@ RUN set -eu; \
 
 RUN set -eux; \
     ver="$(tr -d '[:space:]' < /build/VERSION)"; \
-    gcc -Wall -Wextra -O3 -fPIC \
-        -Iinclude \
-        "-DFRACTALSQL_VERSION=\"${ver}\"" \
-        ${EXT_CFLAGS} \
-        -shared -o "/fractalsql${OUTPUT_SUFFIX}.so" \
-        src/*.c \
+    mkdir -p /build/obj; \
+    # The float paths (the shared precision header, the vector functions, the search, the index and the agents) are
+    # built with contraction and vectorisation OFF, so every distance, norm and cosine is a fixed sequence of IEEE
+    # double operations and the same input gives the same bits on every platform. The other files are built as before.
+    # The list matches the Makefile's FP_FLAGS targets: the same files carry the float paths in both builds, so the
+    # module CI tests is the module a release ships.
+    for f in src/fv_vector.c src/fv_search.c src/fv_index.c src/fv_agents.c; do \
+        gcc -Wall -Wextra -O3 -fPIC -ffp-contract=off -fno-tree-vectorize \
+            -Iinclude \
+            "-DFRACTALSQL_VERSION=\"${ver}\"" \
+            ${EXT_CFLAGS} \
+            -c "$f" -o "/build/obj/$(basename "$f" .c).o"; \
+    done; \
+    for f in $(ls src/*.c | grep -v -e 'src/fv_vector.c' -e 'src/fv_search.c' -e 'src/fv_index.c' -e 'src/fv_agents.c'); do \
+        gcc -Wall -Wextra -O3 -fPIC \
+            -Iinclude \
+            "-DFRACTALSQL_VERSION=\"${ver}\"" \
+            ${EXT_CFLAGS} \
+            -c "$f" -o "/build/obj/$(basename "$f" .c).o"; \
+    done; \
+    gcc -shared -o "/fractalsql${OUTPUT_SUFFIX}.so" \
+        /build/obj/*.o \
         "/build/include/$(cat /platform.txt)/libfractalsql-${CORE_VARIANT}.a" \
         -lm -ldl -lpthread \
         ${EXT_LDFLAGS}; \

@@ -20,12 +20,15 @@
  *   FRACTAL.MORPH.CORTICAL     vertices faces                 -> JSON
  *   FRACTAL.MORPH.NERVE        coords dim edges               -> JSON
  *   FRACTAL.MORPH.COMPLEXITY   points dim                     -> JSON
+ *   FRACTAL.TEXT.CHUNK         text size overlap [mode]       -> JSON array of {no,start,end,text}
  *
  * Index arrays (edges, faces) are packed little-endian uint32.
  */
 #include "fv_common.h"
 
 #include <limits.h>
+#include <stdio.h>
+#include <string.h>
 
 #define ERRSZ 256
 /* Most random draws one fingerprint (bits x vector length) may cost: about
@@ -35,14 +38,15 @@
 
 enum {
     OP_DFA, OP_DRIFT, OP_BOX, OP_CHANGE, OP_PERIOD, OP_SPECT, OP_FPRINT,
-    OP_CYCLE, OP_TDA, OP_PORTFOLIO, OP_VASC, OP_CORT, OP_NERVE, OP_COMPLEX
+    OP_CYCLE, OP_TDA, OP_PORTFOLIO, OP_VASC, OP_CORT, OP_NERVE, OP_COMPLEX, OP_SUBSET
 };
 
 typedef struct {
     fv_job   base;                    /* first */
     int      op;
     double  *a;  size_t na;           /* primary series / points / mu / coords */
-    double  *b;  size_t nb;           /* cov / arc lengths / vertices */
+    double  *b;  size_t nb;           /* cov / arc lengths / vertices / upper bounds */
+    double  *c;  size_t nc;           /* previous weights (OPTIMIZE.SUBSET) */
     size_t  *ix; size_t nix;          /* edges / faces */
     uint8_t *raw; size_t nraw;        /* fingerprint bytes */
     long long i1, i2, i3, i4;
@@ -54,7 +58,7 @@ static void
 acmd_dispose(fv_job *b)
 {
     acmd *j = (acmd *) b;
-    free(j->a); free(j->b); free(j->ix); free(j->raw);
+    free(j->a); free(j->b); free(j->c); free(j->ix); free(j->raw);
     free(j->base.res);
     free(j);
 }
@@ -73,6 +77,17 @@ core_fail(fv_job *b, const char *fn, int rc)
     fv_job_fail(b, "%s failed (rc=%d%s)", fn, rc,
                 rc == FSQL_ERR_INVALID ? ": invalid input for this function" :
                 rc == FSQL_ERR_OOM ? ": out of memory" : "");
+}
+
+/* The objective FRACTAL.OPTIMIZE.SUBSET maximises: sum(weight[i] * item_value[i]). The core's search minimises, so the objective is the
+ * negated sum (the reported score is the positive sum). */
+static double
+subset_value_objective(const double *weights, size_t n, void *ctx)
+{
+    const double *item_values = (const double *) ctx;
+    double sum = 0.0;
+    for (size_t i = 0; i < n; i++) sum += weights[i] * item_values[i];
+    return -sum;
 }
 
 static void
@@ -203,6 +218,20 @@ acmd_work(fv_job *b)
                                         (int) j->i2, (int) j->i3, w, &sharpe);
         if (rc != 0) { free(w); core_fail(b, "fsql_optimize_portfolio_ex", rc); break; }
         fv_sb_appendf(&sb, "{\"sharpe\":%.10f,\"weights\":[", sharpe);
+        for (size_t i = 0; i < n; i++) fv_sb_appendf(&sb, "%s%.10f", i ? "," : "", w[i]);
+        fv_sb_append(&sb, "]}");
+        free(w);
+        finish_json(b, &sb);
+        break;
+    }
+    case OP_SUBSET: {
+        size_t n = j->na;
+        double *w = (double *) calloc(n, sizeof(double));
+        double score = 0;
+        if (w == NULL) { fv_job_fail(b, "out of memory"); break; }
+        rc = fsql_optimize_subset(subset_value_objective, j->a, n, (size_t) j->i1, NULL, j->b, j->c, j->d1, j->seed, w, &score);
+        if (rc != 0) { free(w); core_fail(b, "fsql_optimize_subset", rc); break; }
+        fv_sb_appendf(&sb, "{\"score\":%.10f,\"weights\":[", -score);
         for (size_t i = 0; i < n; i++) fv_sb_appendf(&sb, "%s%.10f", i ? "," : "", w[i]);
         fv_sb_append(&sb, "]}");
         free(w);
@@ -419,6 +448,45 @@ Portfolio_Cmd(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     return acmd_go(ctx, j);
 }
 
+/* FRACTAL.OPTIMIZE.SUBSET item_values upper_bounds k [PREV prev_weights] [TURNOVER penalty] [SEED n]
+ * Value-weighted k-subset allocation: maximise sum(weight[i] * item_values[i]) with at most k of the items weighted, each weight at most its
+ * upper bound (0 to 1), the weights summing to 1. prev_weights and turnover_penalty steer the search away from reallocating (rebalancing). */
+static int
+Subset_Cmd(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+{
+    NEED(argc >= 4 && argc <= 10); NEWJOB(OP_SUBSET);
+    if (fv_blob_to_doubles(argv[1], "item_values", FV_MAX_BLOB_BYTES, &j->a, &j->na, err, sizeof err) != 0 ||
+        fv_blob_to_doubles(argv[2], "upper_bounds", FV_MAX_BLOB_BYTES, &j->b, &j->nb, err, sizeof err) != 0)
+        return acmd_fail(ctx, j, err);
+    if (j->na == 0 || j->na > 100000) return acmd_fail(ctx, j, "item_values must hold 1 to 100000 items");
+    if (j->nb != j->na) return acmd_fail(ctx, j, "upper_bounds length must match item_values");
+    LL(i1, 3, "k", 1, 100000);
+    if ((size_t) j->i1 > j->na) return acmd_fail(ctx, j, "k must be <= the number of items");
+    if ((unsigned long long) j->na * (unsigned long long) j->i1 > 16777216ULL)
+        return acmd_fail(ctx, j, "items x k must not exceed 16777216 (about a minute of work)");
+    for (size_t i = 0; i < j->nb; i++)
+        if (!(j->b[i] >= 0.0 && j->b[i] <= 1.0)) return acmd_fail(ctx, j, "every upper_bounds entry must be in [0, 1]");
+    for (int i = 4; i < argc; i++) {
+        size_t l; const char *w = RedisModule_StringPtrLen(argv[i], &l);
+        if (i + 1 >= argc) { snprintf(err, sizeof err, "%.32s needs a value", w); return acmd_fail(ctx, j, err); }
+        if (l == 4 && strncasecmp(w, "PREV", 4) == 0) {
+            if (fv_blob_to_doubles(argv[++i], "prev_weights", FV_MAX_BLOB_BYTES, &j->c, &j->nc, err, sizeof err) != 0) return acmd_fail(ctx, j, err);
+            if (j->nc != j->na) return acmd_fail(ctx, j, "prev_weights length must match item_values");
+        } else if (l == 8 && strncasecmp(w, "TURNOVER", 8) == 0) {
+            if (fv_arg_double(argv[++i], "turnover_penalty", &j->d1, err, sizeof err) != 0) return acmd_fail(ctx, j, err);
+            if (!(j->d1 >= 0.0)) return acmd_fail(ctx, j, "turnover_penalty must be >= 0");
+        } else if (l == 4 && strncasecmp(w, "SEED", 4) == 0) {
+            long long s;
+            if (fv_arg_ll(argv[++i], "seed", 0, LLONG_MAX, &s, err, sizeof err) != 0) return acmd_fail(ctx, j, err);
+            j->seed = (uint64_t) s;
+        } else {
+            snprintf(err, sizeof err, "unknown option '%.32s'", w);
+            return acmd_fail(ctx, j, err);
+        }
+    }
+    return acmd_go(ctx, j);
+}
+
 /* Edge/face indices must name an existing node/vertex. */
 static int
 indices_in_range(const size_t *ix, size_t n, size_t limit)
@@ -480,6 +548,193 @@ Complex_Cmd(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
     return acmd_go(ctx, j);
 }
 
+
+/* ------------------------------------------------------------------ fractal chunk text */
+#define FV_CHUNK_MAX_SIZE   100000
+#define FV_CHUNK_MAX_CHUNKS 100000
+#define FV_CHUNK_MAX_TEXT   (4u << 20)
+#define FV_CHUNK_MAX_OUT    ((size_t) 64 * 1024 * 1024)   /* the whole JSON result: size x chunks would otherwise reach gigabytes */
+/* ------------------------------------------------------------------ chunking */
+
+typedef struct { char *b; size_t n, cap; int oom; int big; } fvck_ChunkBuf;
+
+static void fvck_cb_put(fvck_ChunkBuf *o, const char *s, size_t len)
+{
+    if (o->oom || o->big) return;
+    if (len > FV_CHUNK_MAX_OUT || o->n > FV_CHUNK_MAX_OUT - len) { o->big = 1; return; }
+    if (o->n + len + 1 > o->cap) {
+        size_t nc = o->cap ? o->cap : 256;
+        char *nb;
+        while (nc < o->n + len + 1) nc *= 2;
+        nb = (char *) realloc(o->b, nc);
+        if (!nb) { o->oom = 1; return; }
+        o->b = nb; o->cap = nc;
+    }
+    memcpy(o->b + o->n, s, len); o->n += len; o->b[o->n] = '\0';
+}
+
+typedef struct { size_t *cp; size_t n; const unsigned char *t; size_t blen; } fvck_ChunkCps;
+
+static int fvck_cps_build(fvck_ChunkCps *c, const unsigned char *t, size_t blen)
+{
+    size_t i = 0;
+    c->t = t; c->blen = blen; c->n = 0;
+    c->cp = (size_t *) malloc((blen + 1) * sizeof(size_t));
+    if (!c->cp) return -1;
+    while (i < blen) {
+        unsigned char b = t[i];
+        size_t len = b < 0x80 ? 1 : (b >= 0xF0 && b <= 0xF4) ? 4 : (b >= 0xE0) ? 3 : (b >= 0xC2) ? 2 : 1, k = 1;
+        c->cp[c->n++] = i;
+        if (b >= 0xF5) len = 1;
+        while (k < len && i + k < blen && (t[i + k] & 0xC0) == 0x80) k++;
+        i += (k == len) ? len : 1;       /* a truncated or invalid sequence is one character per byte */
+    }
+    c->cp[c->n] = blen;
+    return 0;
+}
+
+static int fvck_chunk_is_ws(unsigned char b) { return b == ' ' || b == '\t' || b == '\r' || b == '\n'; }
+
+/* the character at index i as a single byte when it is ASCII, else 0xFF */
+static unsigned char fvck_cps_ascii(const fvck_ChunkCps *c, size_t i)
+{
+    size_t b = c->cp[i];
+    return c->t[b] < 0x80 ? c->t[b] : 0xFF;
+}
+
+static void fvck_chunk_emit(fvck_ChunkBuf *o, const fvck_ChunkCps *c, size_t no, size_t a, size_t b)
+{
+    char tmp[96];
+    int l = snprintf(tmp, sizeof tmp, "%s{\"no\":%lld,\"start\":%lld,\"end\":%lld,\"text\":\"", no ? "," : "", (long long) no, (long long) a, (long long) b);
+    fvck_cb_put(o, tmp, (size_t) l);
+    for (size_t i = c->cp[a]; i < c->cp[b]; i++) {
+        unsigned char ch = c->t[i];
+        if (ch >= 0x80) {
+            /* a byte that does not belong to a well-formed UTF-8 character is written as U+FFFD, so the JSON stays valid UTF-8 */
+            size_t need = ch >= 0xF0 ? 4 : ch >= 0xE0 ? 3 : 2, ln = 1;
+            while (i + ln < c->cp[b] && (c->t[i + ln] & 0xC0) == 0x80 && ln < need) ln++;
+            int okc = 0;
+            if (ch >= 0xC2 && ch <= 0xDF) okc = ln == 2;
+            else if (ch >= 0xE0 && ch <= 0xEF) okc = ln == 3 && !(ch == 0xE0 && c->t[i + 1] < 0xA0) && !(ch == 0xED && c->t[i + 1] >= 0xA0);
+            else if (ch >= 0xF0 && ch <= 0xF4) okc = ln == 4 && !(ch == 0xF0 && c->t[i + 1] < 0x90) && !(ch == 0xF4 && c->t[i + 1] >= 0x90);
+            if (!okc) { fvck_cb_put(o, "\\ufffd", 6); continue; }
+            fvck_cb_put(o, (const char *) &c->t[i], ln);
+            i += ln - 1;
+            continue;
+        }
+        if (ch == '"') fvck_cb_put(o, "\\\"", 2);
+        else if (ch == '\\') fvck_cb_put(o, "\\\\", 2);
+        else if (ch == '\n') fvck_cb_put(o, "\\n", 2);
+        else if (ch == '\r') fvck_cb_put(o, "\\r", 2);
+        else if (ch == '\t') fvck_cb_put(o, "\\t", 2);
+        else if (ch < 0x20) { l = snprintf(tmp, sizeof tmp, "\\u%04x", ch); fvck_cb_put(o, tmp, (size_t) l); }
+        else fvck_cb_put(o, (const char *) &c->t[i], 1);   /* a raw byte: UTF-8 passes through unchanged */
+    }
+    fvck_cb_put(o, "\"}", 2);
+}
+
+/* the span [a,b) split into pieces of at most size characters, overlap shared; the new chunk count, or (size_t)-1 over the cap */
+static size_t fvck_chunk_split(fvck_ChunkBuf *o, const fvck_ChunkCps *c, size_t no, size_t a, size_t b, size_t size, size_t overlap)
+{
+    size_t pos = a;
+    for (;;) {
+        size_t e = pos + size < b ? pos + size : b;
+        if (no >= FV_CHUNK_MAX_CHUNKS || o->big) return (size_t) -1;
+        fvck_chunk_emit(o, c, no++, pos, e);
+        if (e >= b) break;
+        pos = e - overlap;
+    }
+    return no;
+}
+
+int fv_chunk_text(const unsigned char *t, size_t blen, long size, long overlap, int mode, char **out)
+{
+    fvck_ChunkCps c;
+    fvck_ChunkBuf o = { NULL, 0, 0, 0, 0 };
+    size_t no = 0, S = (size_t) size, V = (size_t) overlap, n;
+    int over = 0;
+    *out = NULL;
+    if (fvck_cps_build(&c, t, blen) != 0) return -1;
+    n = c.n;
+    fvck_cb_put(&o, "[", 1);
+    if (mode == 0) {
+        if (n > 0) { no = fvck_chunk_split(&o, &c, 0, 0, n, S, V); over = no == (size_t) -1; }
+    } else {
+        size_t cur_a = 0, cur_b = 0, i = 0;
+        int have = 0;
+        while (i < n && !over) {
+            size_t ua, ub;
+            while (i < n && fvck_chunk_is_ws(fvck_cps_ascii(&c, i))) i++;
+            if (i >= n) break;
+            ua = i;
+            for (;;) {                       /* extend to the end of the unit */
+                unsigned char ch;
+                if (i >= n) { ub = n; break; }
+                ch = fvck_cps_ascii(&c, i);
+                if (fvck_chunk_is_ws(ch)) {       /* whitespace: a paragraph break, or (sentence mode) just a separator? */
+                    size_t j = i; int lf = 0;
+                    while (j < n && fvck_chunk_is_ws(fvck_cps_ascii(&c, j))) { if (fvck_cps_ascii(&c, j) == '\n') lf++; j++; }
+                    if (lf >= 2) { ub = i; i = j; break; }
+                    i = j;
+                    continue;
+                }
+                i++;
+                if (mode == 2 && (ch == '.' || ch == '!' || ch == '?')) {
+                    while (i < n && (fvck_cps_ascii(&c, i) == '.' || fvck_cps_ascii(&c, i) == '!' || fvck_cps_ascii(&c, i) == '?')) i++;
+                    if (i >= n || fvck_chunk_is_ws(fvck_cps_ascii(&c, i))) { ub = i; break; }
+                }
+            }
+            while (ub > ua && fvck_chunk_is_ws(fvck_cps_ascii(&c, ub - 1))) ub--;
+            if (ub == ua) continue;
+            if (ub - ua > S) {               /* longer than a chunk: flush, then split it */
+                if (have) { fvck_chunk_emit(&o, &c, no++, cur_a, cur_b); have = 0; }
+                no = fvck_chunk_split(&o, &c, no, ua, ub, S, V);
+                if (no == (size_t) -1) over = 1;
+            } else if (!have) { cur_a = ua; cur_b = ub; have = 1; }
+            else if (ub - cur_a <= S) { cur_b = ub; }
+            else { fvck_chunk_emit(&o, &c, no++, cur_a, cur_b); cur_a = ua; cur_b = ub; }
+            if (!over && (no >= FV_CHUNK_MAX_CHUNKS || o.big)) over = 1;
+        }
+        if (have && !over) fvck_chunk_emit(&o, &c, no++, cur_a, cur_b);
+    }
+    free(c.cp);
+    fvck_cb_put(&o, "]", 1);
+    if (o.oom) { free(o.b); return -1; }
+    if (over || o.big) { free(o.b); return 1; }
+    *out = o.b;
+    return 0;
+}
+
+/* FRACTAL.TEXT.CHUNK text size overlap [mode] -> JSON array of {no, start, end, text}. Pure: no model, the same output on every FractalSQL host. */
+static int
+Chunk_Cmd(RedisModuleCtx *ctx, RedisModuleString **argv, int argc)
+{
+    if (argc < 4 || argc > 5) return RedisModule_WrongArity(ctx);
+    long long size = 0, overlap = 0;
+    int mode = 1;
+    size_t tl, ml;
+    const char *t = RedisModule_StringPtrLen(argv[1], &tl);
+    if (RedisModule_StringToLongLong(argv[2], &size) != REDISMODULE_OK || size < 1 || size > FV_CHUNK_MAX_SIZE)
+        return fv_reply_err(ctx, "size must be an integer in [1, 100000]");
+    if (RedisModule_StringToLongLong(argv[3], &overlap) != REDISMODULE_OK || overlap < 0 || overlap >= size)
+        return fv_reply_err(ctx, "overlap must be an integer in [0, size-1]");
+    if (argc == 5) {
+        const char *m = RedisModule_StringPtrLen(argv[4], &ml);
+        if (ml == 5 && memcmp(m, "fixed", 5) == 0) mode = 0;
+        else if (ml == 9 && memcmp(m, "paragraph", 9) == 0) mode = 1;
+        else if (ml == 8 && memcmp(m, "sentence", 8) == 0) mode = 2;
+        else return fv_reply_err(ctx, "mode must be one of: fixed, paragraph, sentence");
+    }
+    if (tl > FV_CHUNK_MAX_TEXT) return fv_reply_err(ctx, "text must be at most 4194304 bytes");
+    char *out = NULL;
+    int rc = fv_chunk_text((const unsigned char *) t, tl, (long) size, (long) overlap, mode, &out);
+    if (rc == 1) return fv_reply_err(ctx, "more than 100000 chunks or 64 MiB of output (raise size or lower overlap)");
+    if (rc != 0 || out == NULL) return fv_reply_err(ctx, "out of memory");
+    RedisModule_ReplyWithStringBuffer(ctx, out, strlen(out));
+    free(out);
+    return REDISMODULE_OK;
+}
+
 int
 fv_register_analytics(RedisModuleCtx *ctx)
 {
@@ -494,10 +749,12 @@ fv_register_analytics(RedisModuleCtx *ctx)
         { "FRACTAL.CYCLE.DETECT",       Cycle_Cmd },
         { "FRACTAL.TDA.PERSISTENCE",    Tda_Cmd },
         { "FRACTAL.OPTIMIZE.PORTFOLIO", Portfolio_Cmd },
+        { "FRACTAL.OPTIMIZE.SUBSET",    Subset_Cmd },
         { "FRACTAL.MORPH.VASCULAR",     Vasc_Cmd },
         { "FRACTAL.MORPH.CORTICAL",     Cort_Cmd },
         { "FRACTAL.MORPH.NERVE",        Nerve_Cmd },
         { "FRACTAL.MORPH.COMPLEXITY",   Complex_Cmd },
+        { "FRACTAL.TEXT.CHUNK",         Chunk_Cmd },
     };
     for (size_t i = 0; i < sizeof T / sizeof T[0]; i++)
         if (RedisModule_CreateCommand(ctx, T[i].name, T[i].fn, "readonly allow-stale", 0, 0, 0)

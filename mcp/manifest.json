@@ -14,6 +14,38 @@
       "name": "fractal_search_explore"
     },
     {
+      "description": "Build the native IVF index of a corpus key: a k-means partition with INT8, INT4, FP16 or FP32 codes. The build writes ordinary string keys beside the corpus (one per cell, a metadata key and a generation pointer), so they persist and replicate like any other key. Needs the dimension of the corpus.",
+      "name": "fractal_index_create"
+    },
+    {
+      "description": "Rebuild an index from the current corpus: a new generation is written and the pointer is flipped, so a reader only ever sees a complete generation.",
+      "name": "fractal_index_rebuild"
+    },
+    {
+      "description": "Drop an index: the cells, the metadata and the generation pointer are removed.",
+      "name": "fractal_index_drop"
+    },
+    {
+      "description": "Describe an index: its status (ready, stale, degraded, empty or orphaned) with advice on what to do next (refresh or rebuild), its format and sizes, the rows added since the build, the calibration and the statistics of the last search (the rows the index scanned).",
+      "name": "fractal_index_info"
+    },
+    {
+      "description": "The corpus positions a Scout pass should look at: the rows of the nearest cells of an index, nearest first, plus the rows added after the build. A shortlist, not an answer: the distances are not computed here.",
+      "name": "fractal_index_candidates"
+    },
+    {
+      "description": "List the indexes of a corpus key, each with its format, dimension, rows indexed, rows now, status (ready, stale, degraded, empty or orphaned) and generation.",
+      "name": "fractal_index_list"
+    },
+    {
+      "description": "Fold the rows appended to a corpus since the build into the index's cells, without retraining: a new generation is written and the pointer is flipped. Rewritten or removed rows need fractal_index_rebuild; fractal_index_info says which one it advises.",
+      "name": "fractal_index_refresh"
+    },
+    {
+      "description": "Bring an index up to date with the least work and say what was done: create it when it does not exist, refresh it when up to a quarter of its rows were appended since the build, rebuild it when more were added or rows were rewritten or removed, and leave it alone when it is current. The reply names the action (created, refreshed, rebuilt or unchanged), the status, the generation and the rows.",
+      "name": "fractal_index_ensure"
+    },
+    {
       "description": "Start (or reset) a diversify session: later searches given the same session avoid the neighbourhoods it has been told to reject.",
       "name": "fractal_diversify_enable"
     },
@@ -78,7 +110,7 @@
       "name": "fractal_agent_recommend_diverse"
     },
     {
-      "description": "Natural-language question over a valkey-search index: the model writes a query, the module validates and runs it under YOUR ACL, and the model analyses the rows. Needs valkey-search and a model.",
+      "description": "Natural-language question over hashes: the model writes a filter, the module validates and runs it under YOUR ACL, and the model analyses the rows. Uses a valkey-search index when it is loaded, otherwise scans the keys under a prefix. Needs a model.",
       "name": "fractal_agent_data_analyst"
     },
     {
@@ -134,8 +166,12 @@
       "name": "fractal_search_agent"
     },
     {
-      "description": "Retrieval-augmented answer: search_agent with a fixed search. Returns the answer, source_doc_ids and timing.",
+      "description": "Retrieval-augmented answer: search_agent with a fixed search. Returns the answer, source_row_ids (the rows' ids: the IDS hash values when given, else the row indexes) and timing.",
       "name": "fractal_rag_agent"
+    },
+    {
+      "description": "The table-free CONVERGENCE function: Stochastic Fractal Search toward the query direction, answering {dim, population_size, best_point, best_fit}. It reads no key and is not a retrieval command (the indexed search is fractal_search with an index).",
+      "name": "fractal_sfs_converge"
     },
     {
       "description": "Detrended fluctuation analysis exponent of a series: about 0.5 for noise, above 1 for persistent trends.",
@@ -152,6 +188,10 @@
     {
       "description": "Dominant frequencies of a series: the strongest spectral peaks.",
       "name": "fractal_periodogram"
+    },
+    {
+      "description": "Split text into chunks of at most chunk_size characters (code points): a JSON array of {no, start, end, text}; start and end are character offsets, end exclusive. chunk_mode paragraph (default) packs whole paragraphs, sentence packs whole sentences, fixed cuts every chunk_size - chunk_overlap characters; a paragraph or sentence longer than chunk_size is cut with chunk_overlap shared. Pure: no model, the same output on every FractalSQL host.",
+      "name": "fractal_chunk_text"
     },
     {
       "description": "Indices where the series' behaviour changes.",
@@ -192,6 +232,62 @@
     {
       "description": "Cardinality-constrained Sharpe maximisation by Stochastic Fractal Search.",
       "name": "fractal_optimize_portfolio"
+    },
+    {
+      "description": "Value-weighted k-subset allocation: maximise sum(weight x item_value) with at most k items weighted, each weight at most its upper bound, the weights summing to 1. prev_weights and turnover_penalty steer the search away from reallocating (rebalancing). Answers {score, weights}.",
+      "name": "fractal_optimize_subset"
+    },
+    {
+      "description": "Upserts a feature vector against a doc_id in a hash key (the generic per-item feature store); the last write wins. Returns OK.",
+      "name": "fractal_store_morphology"
+    },
+    {
+      "description": "Brute-force k-NN (true Euclidean, ascending) over the feature store hash. Returns [{'doc_id','distance'}], nearest first. A stored vector of another dimension is skipped, not an error.",
+      "name": "fractal_mine_topology_negatives"
+    },
+    {
+      "description": "Parses a vector from text -- a JSON array, or a comma-separated list of numbers -- into the canonical vector.",
+      "name": "fractal_vector_from_text"
+    },
+    {
+      "description": "Renders a vector as JSON: the array of numbers, so a client can see exactly what the engine holds.",
+      "name": "fractal_vector_to_json"
+    },
+    {
+      "description": "The vector's L2 norm (its magnitude).",
+      "name": "fractal_vector_norm"
+    },
+    {
+      "description": "The vector scaled to unit length, so a distance between two vectors reflects direction only.",
+      "name": "fractal_vector_normalize"
+    },
+    {
+      "description": "The element-wise sum of two vectors.",
+      "name": "fractal_vector_add"
+    },
+    {
+      "description": "The element-wise difference of two vectors.",
+      "name": "fractal_vector_sub"
+    },
+    {
+      "description": "The vector multiplied by a scalar factor.",
+      "name": "fractal_vector_scale"
+    },
+    {
+      "description": "The L2 (Euclidean) distance between two vectors.",
+      "name": "fractal_vector_l2_distance"
+    },
+    {
+      "description": "The squared L2 distance: the same measure without the square root.",
+      "name": "fractal_vector_l2_squared"
+    },
+    {
+      "description": "The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal.",
+      "name": "fractal_vector_cosine_distance"
+    },
+    {
+      "description": "The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal.",
+      "name": "fractal_vector_cosine_similarity"
     },
     {
       "description": "Minkowski L_p distance.",
@@ -282,5 +378,5 @@
       "name": "fractal_version"
     }
   ],
-  "version": "2.0.2"
+  "version": "2.0.3"
 }

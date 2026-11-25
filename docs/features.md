@@ -30,8 +30,16 @@ datastore's process. See the [FractalSQL Daemon](fractalsql-daemon.md).
 
 ## 🔍 Tier 1: Discovery
 
-The foundation of FractalSQL is the **Stochastic Fractal Search (SFS)** engine, which treats vector search as a
-continuous optimization problem rather than an index lookup like standard HNSW or IVFFlat.
+FractalSQL has two ways to find rows. The **Stochastic Fractal Search (SFS)** engine treats
+the problem as continuous optimization and powers `FRACTAL.SEARCH` (Sniper) and the diverse
+**Scout** discovery; the **IVF index** gives fast, verified nearest-neighbour search over
+your stored rows, like an index lookup in standard HNSW or IVFFlat, with exact distances
+and a recall you can measure.
+
+### Indexed Search (`FRACTAL.INDEX.*`)
+`FRACTAL.INDEX.CREATE <corpus_key> <name> DIM <n>` builds an index over a corpus key (the rows are partitioned into k-means cells and each row gets a compact code — INT8, INT4, FP16 or FP32), and `FRACTAL.SEARCH <corpus_key> <query> <k> INDEX <name>` returns the `k` nearest rows to a query vector. With an index the search reads a few cells instead of the whole corpus, and it re-scores every candidate against the corpus with the same double-precision cosine, so the distances it returns are **exact**: the index only chooses which rows to look at, it does not approximate the answer. Without an index the same call scans the corpus and returns the same distances, only slower. The index lives in ordinary string keys beside the corpus, so it persists and replicates like any other key. The nearest-row agents can search through an index too, off by default — see [Agency](api-agency.md). Building, refreshing and checking an index, and the search options, are in [Discovery](api-discovery.md#the-native-ivf-index).
+
+
 
 ### Sniper Search (`FRACTAL.SEARCH`)
 Pure SFS convergence to the minimum cosine distance to a query, returning the top-k nearest rows of a corpus key
@@ -91,11 +99,11 @@ argument reference, real example output, and notes.
 | `FRACTAL.AGENT.ALLOCATE` | SFS Sharpe optimizer → reasoning rationale | ✓ |
 | `FRACTAL.AGENT.REBALANCE_SIBLING` | optimizer + search on the change → reasoning rationale | ✓ |
 | `FRACTAL.AGENT.DIVERSE_PORTFOLIOS` (enterprise) | multi-restart SFS + diverse-select → reasoning comparison | ✓ |
-| `FRACTAL.AGENT.ROUTE_TASK` | nearest-capability search + budget accounting → reasoning rationale | ✓ |
+| `FRACTAL.AGENT.ROUTE_TASK` | nearest-capability search (through an index with `agent-use-index yes`) + budget accounting → reasoning rationale | ✓ |
 | `FRACTAL.AGENT.SCHEDULE_WORKLOAD` | SFS refine + nearest node → reasoning rationale | ✓ |
 | `FRACTAL.AGENT.OUTLIER_INTERCEPT` | distance-to-bad-state safety barrier → reasoning justification | ✓ |
 | `FRACTAL.AGENT.PATIENT_DETERIORATION_TRIAGE` | cohort search + drift on the change → reasoning triage | ✓ |
-| `FRACTAL.AGENT.DATA_ANALYST` | question → valkey-search query → result → analysis | ✓ (needs valkey-search) |
+| `FRACTAL.AGENT.DATA_ANALYST` | question → filter → result → analysis (valkey-search index, or a bounded scan of a key prefix when it is not loaded) | ✓ |
 | `FRACTAL.AGENT.RECALL_HYBRID` | cohort-restricted vector recall | — |
 | `FRACTAL.AGENT.RECOMMEND_DIVERSE` | repulsion-diverse top-k | — |
 | `FRACTAL.AGENT.FEEDBACK_AUDIT` | diversify loop + collapse diagnostics | — |
@@ -196,14 +204,15 @@ portfolios, or the non-dominated return-versus-risk front, instead of one.
 
 ## 📈 Benchmarks & Scaling
 
-### valkey-search (HNSW) vs. Scout Discovery
+### valkey-search (HNSW), the native IVF index and Scout Discovery
 
-FractalSQL is not an index. `FRACTAL.SEARCH` and `FRACTAL.EXPLORE` evaluate their fitness against the whole corpus on
-every call, which is O(N x d) by design, and it is the only way here to guarantee the model receives a genuinely diverse set
-of perspectives rather than a single collapsed cluster. A vector index answers a nearest-neighbour query far faster and
-tends to return neighbours from the query's own cluster. They solve different problems; FractalSQL is **not** a drop-in
-replacement for an index. Use it where diversity, analytics or an agent matters more than latency (curated sub-corpora,
-not full-corpus top-k at scale), and use valkey-search for retrieval at scale.
+Three different tools answer "which rows are near this vector":
+
+- **`FRACTAL.SEARCH` with an index** (`FRACTAL.INDEX.CREATE`, then `FRACTAL.SEARCH ... INDEX`): the native IVF index. It probes a few cells instead of scanning every row, then verifies every candidate against the stored vectors, so the distances it returns are exact; only which rows are examined is approximate, at a recall the build measures. With no index, or with `USE_INDEX 0`, the same call is the exact scan, which is the reference to compare against. There is nothing to install beside the module.
+- **`FRACTAL.EXPLORE` (Scout)**: evaluates its fitness against the whole corpus on every call, which is O(N x d) by design, and it is the only way here to guarantee the model receives a genuinely diverse set of perspectives rather than a single collapsed cluster. Use it where diversity, analytics or an agent matters more than latency.
+- **valkey-search (HNSW)**: a separate module with its own index, filters and query language. It is optional. Use it when you want its secondary indexes over hash fields, filtered queries, or full-text and tag search. `FRACTAL.AGENT.DATA_ANALYST` uses it when it is loaded, and scans a key prefix when it is not (see [Sovereign Agency](api-agency.md#data-analyst-fractalagentdata_analyst)).
+
+A vector index answers a nearest-neighbour query far faster than a full scan and tends to return neighbours from the query's own cluster; Scout returns several clusters in more time. They solve different problems, and none of them is a drop-in replacement for the others.
 
 `bench/head_to_head.py` runs the same clustered dataset through valkey-search's HNSW and `FRACTAL.EXPLORE`, and reports latency and
 how many distinct clusters each answer covers ([bench/README.md](../bench/README.md)). Expect this pattern: HNSW

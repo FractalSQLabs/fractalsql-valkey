@@ -62,7 +62,7 @@ Depending on your role, you'll want to start in different places:
 </p>
 Four tiers of commands (Discovery, Cognition, Agency, Analytics), composable in your application, plus an optional Enterprise ledger.
 
-- **Discovery**: diverse, mode-collapse-free retrieval: `FRACTAL.SEARCH` (Sniper) and `FRACTAL.EXPLORE` (Scout), plus named sessions that remember what a caller rejected (`FRACTAL.DIVERSIFY.*`, `FRACTAL.FEEDBACK`, `SESSION`). See [Discovery](docs/api-discovery.md).
+- **Discovery**: diverse, mode-collapse-free retrieval: `FRACTAL.SEARCH` (Sniper) and `FRACTAL.EXPLORE` (Scout), plus named sessions that remember what a caller rejected (`FRACTAL.DIVERSIFY.*`, `FRACTAL.FEEDBACK`, `SESSION`), plus an optional native IVF index over a corpus key (`FRACTAL.INDEX.*`, `FRACTAL.SEARCH ... INDEX <name>`) whose distances are still exact. See [Discovery](docs/api-discovery.md).
 - **Analytics**: dimension and series primitives: `FRACTAL.DIM.DFA`/`DRIFT`/`BOXCOUNT`, `FRACTAL.SERIES.CHANGEPOINT`/`PERIODOGRAM`/`SPECTROGRAM`/`FINGERPRINT`, `FRACTAL.CYCLE.DETECT`, `FRACTAL.TDA.PERSISTENCE`, `FRACTAL.OPTIMIZE.PORTFOLIO`, `FRACTAL.MORPH.*`, and `FRACTAL.VECTOR.*` math. See [Analytics](docs/api-analytics.md).
 - **Cognition**: LLM integration through the `fractalsqld` daemon: `FRACTAL.REASON` and `FRACTAL.EMBED` (Ollama, vLLM, OpenAI-compatible endpoints, your own cloud account). See [Cognition](docs/api-cognition.md).
 - **Agency**: autonomous, self-correcting routines that decide from your keys: twenty-one agent commands (anomaly and regime triage, allocation, routing, outlier interception, cohort recall, diverse recommendation, loop detection, retrieve-then-reason, questions answered from a valkey-search index, and more). Each computes first and reasons last, so a model outage never costs you the numbers. See [Agency](docs/api-agency.md).
@@ -72,8 +72,9 @@ Every command is an ordinary Valkey command. Vectors are packed little-endian fl
 BLOBs in ordinary string keys, so there is no new data type, nothing extra in your RDB or AOF,
 and nothing for a replica to do differently.
 
-The question-answering agent (`DATA_ANALYST`) asks valkey-search for a query expression. FractalSQL is not a vector index either: for nearest-neighbour search
-at scale use valkey-search beside it (see [Features](docs/features.md#-benchmarks--scaling)).
+The question-answering agent (`DATA_ANALYST`) uses valkey-search when it is loaded, and scans the keys under a prefix when it is not, so it needs no extra module.
+For nearest-neighbour search at scale build a native IVF index (`FRACTAL.INDEX.CREATE`, then `FRACTAL.SEARCH ... INDEX`); valkey-search stays an optional
+beside-it choice for secondary indexes, filters and full-text (see [Features](docs/features.md#-benchmarks--scaling)).
 
 ---
 

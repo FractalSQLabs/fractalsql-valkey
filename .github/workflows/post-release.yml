@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag to process (e.g. v2.0.2)'
+        description: 'Release tag to process (e.g. v2.0.3)'
         required: true
 
 # Read-only by default; the one job below asks for what it needs.

@@ -42,14 +42,17 @@ class RespError(Exception):
 # (a crash or a hang fails the gate). Each distinct (command, mutation) is sent once.
 MUTATE_AGENTS = os.environ.get("FSQL_AGENT_MUTATE") == "1"
 AGENT_KEYWORDS = ["IDS", "CONTENT", "CONTEXT", "SEED", "COST_PER_ROUTE", "ITERATIONS", "POPULATION", "N_RESTARTS", "OVERLAP", "QUALITY",
-                  "OBJECTIVE_MODE", "N_BITS", "HAMMING_THRESHOLD", "WARMUP_COUNT", "K", "METRIC", "MAX_ATTEMPTS", "LIMIT", "FILTER",
+                  "OBJECTIVE_MODE", "N_BITS", "HAMMING_THRESHOLD", "WARMUP_COUNT", "K", "METRIC", "MAX_ATTEMPTS", "LIMIT", "FILTER", "MODE", "PREFIX",
                   "BOXCOUNT_DIM", "NOPE"]
 AWKWARD = "a\rb\tc\nd\"e\\f\x01g\u00e9"   # every character the JSON string writer has to escape
 AGENT_VALUES = ["1", "2", "0.5", "0", "-1", "x", "nan", "cosine", "l2", "sharpe", "pareto", "{}", "99999999999", "", AWKWARD]
 AGENT_BAD = ["", "x", "-1", "0", "nan", "1e308", "99999999999", AWKWARD]
 _agent_seen = set()
 # Commands whose mutants would change what later checks see (they write ledgers, drop sessions, lock or unload things): sent as written only.
-_NO_MUTATE = ("FRACTAL.LEDGER.", "FRACTAL.AUDIT.", "FRACTAL.SESSION.CLOSE", "FRACTAL.DIVERSIFY.", "FRACTAL.AGENT.FEEDBACK", "FRACTAL.FEEDBACK")
+_NO_MUTATE = ("FRACTAL.LEDGER.", "FRACTAL.AUDIT.", "FRACTAL.SESSION.CLOSE", "FRACTAL.DIVERSIFY.", "FRACTAL.AGENT.FEEDBACK", "FRACTAL.FEEDBACK",
+              # index and feature-store writers: a mutant would create an index named "x", rebuild one in another format or store an extra doc_id,
+              # and the next check reads exactly that state
+              "FRACTAL.INDEX.CREATE", "FRACTAL.INDEX.REFRESH", "FRACTAL.INDEX.REBUILD", "FRACTAL.INDEX.DROP", "FRACTAL.INDEX.ENSURE", "FRACTAL.FEATURE.STORE")
 
 
 def mutable_command(cmd):
@@ -165,10 +168,12 @@ class Run:
         print("KNOWN %s %s: %s" % (self.gate, name, detail))
 
     def check(self, name, cond, detail=""):
+        """Records the check and returns whether it held, so a gate can run its follow-up checks only when it did."""
         if cond:
             self.ok(name)
         else:
             self.bad(name, detail)
+        return bool(cond)
 
     def is_err(self, v, needle=None):
         return isinstance(v, RespError) and (needle is None or needle in str(v))
@@ -490,7 +495,53 @@ def gate_07(r):
     pg = jload(c.call("FRACTAL.SERIES.PERIODOGRAM", pack(sine), "3"))
     r.check("periodogram top frequency is the true 0.125 bin", pg is not None and abs(pg["freqs"][0] - 0.125) < 1e-3, str(pg))
     r.check("periodogram honours max_peaks", pg is not None and len(pg["freqs"]) == 3 == len(pg["power"]))
+    r.check("periodogram document has exactly the keys freqs and power", pg is not None and set(pg) == {"freqs", "power"}, str(pg)[:80])
     r.check("periodogram refuses max_peaks = 0", r.is_err(c.call("FRACTAL.SERIES.PERIODOGRAM", pack(sine), "0")))
+    # FRACTAL.TEXT.CHUNK: the same chunks as every FractalSQL host (pinned cases)
+    ck = jload(c.call("FRACTAL.TEXT.CHUNK", "abcdefghij", "4", "1", "fixed"))
+    r.check("chunk text fixed, size 4, overlap 1",
+            ck == [{"no": 0, "start": 0, "end": 4, "text": "abcd"}, {"no": 1, "start": 3, "end": 7, "text": "defg"},
+                   {"no": 2, "start": 6, "end": 10, "text": "ghij"}], str(ck))
+    ck = jload(c.call("FRACTAL.TEXT.CHUNK", "One. Two sentences! Is this three? Yes.  Four is a long one that keeps on going and going.", "30", "5", "sentence"))
+    r.check("chunk text sentence packing, a long sentence split with overlap",
+            [(x["start"], x["end"], x["text"]) for x in ck] ==
+            [(0, 19, "One. Two sentences!"), (20, 39, "Is this three? Yes."), (41, 71, "Four is a long one that keeps "), (66, 90, "eeps on going and going.")], str(ck))
+    r.check("chunk text of an empty string is []", jload(c.call("FRACTAL.TEXT.CHUNK", "", "10", "0")) == [])
+    r.check("chunk text: a paragraph break needs two line feeds", jload(c.call("FRACTAL.TEXT.CHUNK", "one\ntwo\nthree", "100", "0"))[0]["end"] == 13)
+    r.check("chunk text refuses an overlap of size or more", r.is_err(c.call("FRACTAL.TEXT.CHUNK", "x", "5", "5")))
+    r.check("chunk text refuses an unknown mode", r.is_err(c.call("FRACTAL.TEXT.CHUNK", "x", "5", "0", "word")))
+    # Unicode text: accented Latin, CJK, right-to-left, emoji, combining marks and JSON-special characters keep their characters
+    uni = {
+        "latin": "Crème brûlée à la façon de São Paulo, naïve café, Ångström, straße",
+        "cjk": "日本語のテキストと中文汉字、한국어 문장입니다",
+        "rtl": "مرحبا بالعالم שלום עולם",
+        "emoji": "😀👍🏽🇯🇵 👨‍👩‍👧‍👦 ok 🧪",
+        "combining": "e\u0301 n\u0303 a\u0308\u0323 end",
+        "specials": "quote \" backslash \\ tab\t newline\n ctrl \x01\x1f slash / <tag> &amp; \u2028 \u2029",
+    }
+    for name, text in uni.items():
+        one = jload(c.call("FRACTAL.TEXT.CHUNK", text, "100000", "0", "fixed"))
+        r.check("unicode %s: one chunk holds the whole text" % name, bool(one) and len(one) == 1 and one[0]["text"] == text and one[0]["end"] == len(text), str(one)[:120])
+        for size, ov in ((5, 0), (7, 3), (1, 0)):
+            ck = jload(c.call("FRACTAL.TEXT.CHUNK", text, str(size), str(ov), "fixed")) or []
+            r.check("unicode %s: size %d overlap %d offsets are character offsets, at most %d characters" % (name, size, ov, size),
+                    bool(ck) and all(x["text"] == text[x["start"]:x["end"]] and len(x["text"]) <= size for x in ck))
+            if ov == 0:
+                r.check("unicode %s: size %d chunks join back to the text" % (name, size), "".join(x["text"] for x in ck) == text)
+        c.call("SET", "uni:" + name, text)
+        got = c.call("GET", "uni:" + name)
+        got = got.decode("utf-8") if isinstance(got, bytes) else got
+        r.check("unicode %s: a key round trip returns the same characters" % name, got == text)
+    # bytes that are not UTF-8: the reply is valid UTF-8 JSON (the bad bytes become U+FFFD) or an error
+    for label, raw in (("lone continuation", b"a\x80b"), ("0xff", b"a\xffb"), ("truncated sequence", b"ab\xe2\x82")):
+        rep = c.call("FRACTAL.TEXT.CHUNK", raw, "100000", "0", "fixed")
+        ok = r.is_err(rep)
+        if not ok:
+            try:
+                json.loads(rep.decode("utf-8") if isinstance(rep, bytes) else rep); ok = True
+            except Exception:
+                ok = False
+        r.check("unicode invalid bytes (%s): valid UTF-8 JSON or an error" % label, ok)
     tone = jload(c.call("FRACTAL.SERIES.SPECTROGRAM", pack(sine), "64", "32"))
     r.check("spectrogram reads a pure tone as ordered (all frames < 0.5)", isinstance(tone, list) and tone and all(0 <= x < 0.5 for x in tone), str(tone)[:80])
     noise = jload(c.call("FRACTAL.SERIES.SPECTROGRAM", pack([rng.gauss(0, 1) for _ in range(512)]), "64", "32"))
@@ -558,6 +609,45 @@ def gate_07(r):
     r.check("portfolio refuses k > n_assets", r.is_err(c.call("FRACTAL.OPTIMIZE.PORTFOLIO", pack(mu), pack(cov), "6")))
     r.check("portfolio refuses a cov of the wrong size", r.is_err(c.call("FRACTAL.OPTIMIZE.PORTFOLIO", pack(mu), pack(cov[:20]), "2")))
     r.check("portfolio refuses an unknown diffusion mode", r.is_err(c.call("FRACTAL.OPTIMIZE.PORTFOLIO", pack(mu), pack(cov), "2", "1", "0", "brownian")))
+
+    # --- value-weighted k-subset allocation
+    vals = [0.9, 0.1, 0.5, 0.8, 0.2, 0.7]
+    ub = [0.6] * 6
+    s1 = c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub), "2", "PREV", pack([0.0] * 6), "TURNOVER", "0", "SEED", "7")
+    s2 = c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub), "2", "PREV", pack([0.0] * 6), "TURNOVER", "0", "SEED", "7")
+    sj = jload(s1)
+    r.check("subset is deterministic for a seed", s1 == s2)
+    sw = sj["weights"] if sj else []
+    r.check("subset weights sum to 1, at most k=2 are nonzero and none exceeds its upper bound",
+            sj is not None and abs(sum(sw) - 1.0) < 1e-6 and sum(1 for x in sw if x > 1e-9) <= 2 and all(x <= 0.6 + 1e-6 for x in sw), str(sj))
+    r.check("subset picks the two most valuable items (0.9 and 0.8) and reports their value-weighted score",
+            sj is not None and sw[0] > 0 and sw[3] > 0 and abs(sj["score"] - sum(w_ * v_ for w_, v_ in zip(sw, vals))) < 1e-6, str(sj))
+    r.check("subset works without the optional arguments", jload(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub), "3")) is not None)
+    r.check("subset refuses k = 0", r.is_err(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub), "0")))
+    r.check("subset refuses k greater than the item count", r.is_err(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub), "7")))
+    r.check("subset refuses upper_bounds of the wrong length", r.is_err(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub[:5]), "2")))
+    r.check("subset refuses an upper bound over 1", r.is_err(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack([2.0] * 6), "2")))
+    r.check("subset refuses a negative turnover penalty", r.is_err(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack(ub), "2", "PREV", pack([0.0] * 6), "TURNOVER", "-1")))
+    r.check("subset refuses bounds that cannot sum to 1 with k items", r.is_err(c.call("FRACTAL.OPTIMIZE.SUBSET", pack(vals), pack([0.1] * 6), "2")))
+
+    # --- the named feature store: a hash of doc_id -> vector
+    c.call("DEL", "bt:feat")
+    r.check("feature store: store answers OK", c.call("FRACTAL.FEATURE.STORE", "bt:feat", "1", pack([1.0, 0.0, 0.0])) in ("OK", b"OK"))
+    c.call("FRACTAL.FEATURE.STORE", "bt:feat", "2", pack([0.9, 0.1, 0.0]))
+    c.call("FRACTAL.FEATURE.STORE", "bt:feat", "3", pack([0.0, 1.0, 0.0]))
+    c.call("FRACTAL.FEATURE.STORE", "bt:feat", "2", pack([0.8, 0.2, 0.0]))     # the last write wins
+    c.call("FRACTAL.FEATURE.STORE", "bt:feat", "9", pack([1.0, 1.0]))          # another dimension
+    fm = jload(c.call("FRACTAL.FEATURE.MINE", "bt:feat", pack([1.0, 0.0, 0.0]), "2"))
+    r.check("feature store: mine is nearest first (doc 1, then doc 2)", fm is not None and [x["doc_id"] for x in fm] == [1, 2], str(fm))
+    r.check("feature store: the distance is Euclidean and doc 2 holds its last write", fm is not None and abs(fm[1]["distance"] - 0.28284271247) < 1e-5, str(fm))
+    fm = jload(c.call("FRACTAL.FEATURE.MINE", "bt:feat", pack([1.0, 0.0, 0.0]), "10"))
+    r.check("feature store: a vector of another dimension is skipped", fm is not None and [x["doc_id"] for x in fm] == [1, 2, 3], str(fm))
+    r.check("feature store: an empty or missing key mines to []", jload(c.call("FRACTAL.FEATURE.MINE", "bt:feat:none", pack([1.0, 0.0, 0.0]), "3")) == [])
+    r.check("feature store: k = 0 is refused", r.is_err(c.call("FRACTAL.FEATURE.MINE", "bt:feat", pack([1.0, 0.0, 0.0]), "0")))
+    r.check("feature store: a negative doc_id is refused", r.is_err(c.call("FRACTAL.FEATURE.STORE", "bt:feat", "-1", pack([1.0]))))
+    c.call("SET", "bt:feat:str", "x")
+    r.check("feature store: a key of another type is refused", r.is_err(c.call("FRACTAL.FEATURE.STORE", "bt:feat:str", "1", pack([1.0])), "WRONGTYPE"))
+    c.call("DEL", "bt:feat", "bt:feat:str")
 
     # --- morphology
     # The core's box-counting step needs ~3000 points to find enough valid
@@ -1192,9 +1282,63 @@ def gate_15(r):
     for name, cmd in (("SEARCH_AGENT", ("FRACTAL.SEARCH.AGENT", "bt:ag:t15", "what is nearby", "3", "POPULATION", "5", "CONTENT", "bt:ag:t15tx", "IDS", "bt:ag:t15id")),
                       ("RAG_AGENT", ("FRACTAL.RAG.AGENT", "bt:ag:t15", "what is nearby", "3", "CONTENT", "bt:ag:t15tx", "IDS", "bt:ag:t15id"))):
         ag = jload(c.call(*cmd))
+        r.check("%s also returns source_row_ids: the IDS hash values of the rows, best first" % name,
+                ag is not None and "doc0" in ag.get("source_row_ids", []) and len(ag.get("source_row_ids", [])) >= 1 and "source_doc_ids" not in ag, str(ag)[:160])
         r.check("%s returns the provider's answer, the source rows and a measured time" % name,
-                ag is not None and "SELECT 1" in str(ag.get("answer")) and 0 in ag.get("source_doc_ids", [])
-                and isinstance(ag.get("execution_time_ms"), int) and "reasoning_step_failed" not in ag, str(ag)[:160])
+                ag is not None and "SELECT 1" in str(ag.get("answer")) and "doc0" in ag.get("source_row_ids", [])
+                and ag.get("used_index") is False and isinstance(ag.get("execution_time_ms"), int) and "reasoning_step_failed" not in ag, str(ag)[:160])
+    # the search and RAG agents through an index (the server runs with agent-use-index yes): the mock embeds every text as [0.1,0.2,0.3]
+    rng15 = random.Random(15)
+    rows15 = [[0.1, 0.2, 0.3]] + [[rng15.gauss(0, 1) for _ in range(3)] for _ in range(399)]
+    c.call("SET", "bt:ag:ix15", b"".join(pack(x) for x in rows15))
+    ag0 = jload(c.call("FRACTAL.RAG.AGENT", "bt:ag:ix15", "what is nearby", "3"))
+    r.check("RAG_AGENT before an index exists scans exactly and says so",
+            ag0 is not None and ag0.get("used_index") is False and 0 in ag0.get("source_row_ids", []), str(ag0)[:140])
+    ix = c.call("FRACTAL.INDEX.ENSURE", "bt:ag:ix15", "ix15", "DIM", "3", "VECTOR_FORMAT", "FP32")
+    if not r.is_err(ix):
+        ix = jload(ix)
+        r.check("INDEX.ENSURE creates a missing index and reports the action, status and generation",
+                ix.get("action") == "created" and ix.get("status") == "ready" and ix.get("generation") == 1 and ix.get("rows") == 400, ix)
+        ix = jload(c.call("FRACTAL.INDEX.ENSURE", "bt:ag:ix15", "ix15", "DIM", "3", "VECTOR_FORMAT", "FP32"))
+        r.check("INDEX.ENSURE on an up-to-date index changes nothing",
+                ix.get("action") == "unchanged" and ix.get("status") == "ready" and ix.get("generation") == 1, ix)
+        for name, cmd in (("SEARCH_AGENT", ("FRACTAL.SEARCH.AGENT", "bt:ag:ix15", "what is nearby", "3", "POPULATION", "5")),
+                          ("RAG_AGENT", ("FRACTAL.RAG.AGENT", "bt:ag:ix15", "what is nearby", "3"))):
+            ag = jload(c.call(*cmd))
+            r.check("%s goes through the index when agent-use-index is on and returns the exact nearest row" % name,
+                    ag is not None and ag.get("used_index") is True and ag.get("source_row_ids", [None])[0] == 0
+                    and "reasoning_step_failed" not in ag, str(ag)[:160])
+        # PLAN_EXPLORE through the index: Scout runs over the shortlist, and every branch_id is still the row's position in the key
+        pe = jload(c.call("FRACTAL.AGENT.PLAN_EXPLORE", "bt:ag:ix15", "what is nearby", "3", "5"))
+        pe_ok = isinstance(pe, list) and len(pe) > 0 and all(
+            isinstance(b, dict) and 0 <= b.get("branch_id", -1) < 400
+            and all(abs(x - y) < 1e-5 for x, y in zip(b.get("plan_trajectory", []), rows15[b["branch_id"]])) for b in pe)
+        r.check("PLAN_EXPLORE through the index returns branches whose ids are the rows' positions in the key", pe_ok, str(pe)[:200])
+        info_pe = jload(c.call("FRACTAL.INDEX.INFO", "bt:ag:ix15", "ix15"))
+        r.check("PLAN_EXPLORE really went through the index (FRACTAL.INDEX.INFO records the search)",
+                (info_pe.get("last_search") or {}).get("used_index") is True, info_pe)
+        pe2 = jload(c.call("FRACTAL.AGENT.PLAN_EXPLORE", "bt:ag:ix15", "what is nearby", "3", "5", "INDEX", "ix15"))
+        r.check("INDEX <name> on PLAN_EXPLORE names the index and answers", isinstance(pe2, list) and len(pe2) > 0, str(pe2)[:160])
+        r.check("PLAN_EXPLORE with an INDEX that does not exist is an error",
+                r.is_err(c.call("FRACTAL.AGENT.PLAN_EXPLORE", "bt:ag:ix15", "what is nearby", "3", "5", "INDEX", "nope"), "no usable index"))
+        c.call("APPEND", "bt:ag:ix15", pack([0.1, 0.2, 0.3]))
+        ag = jload(c.call("FRACTAL.RAG.AGENT", "bt:ag:ix15", "what is nearby", "3"))
+        r.check("a row appended after the build is still seen by the index path (the delta is scanned exactly)",
+                ag is not None and ag.get("used_index") is True and 400 in ag.get("source_row_ids", []), str(ag)[:160])
+        ix = jload(c.call("FRACTAL.INDEX.ENSURE", "bt:ag:ix15", "ix15", "DIM", "3", "VECTOR_FORMAT", "FP32"))
+        r.check("INDEX.ENSURE after a small append refreshes (a new generation, no retraining)",
+                ix.get("action") == "refreshed" and ix.get("generation") == 2 and ix.get("rows") == 401, ix)
+        c.call("APPEND", "bt:ag:ix15", b"".join(pack(x) for x in rows15[1:201]))
+        ix = jload(c.call("FRACTAL.INDEX.ENSURE", "bt:ag:ix15", "ix15", "DIM", "3", "VECTOR_FORMAT", "FP32"))
+        r.check("INDEX.ENSURE after a large append (over a quarter of the rows) rebuilds",
+                ix.get("action") == "rebuilt" and ix.get("generation") == 3 and ix.get("rows") == 601, ix)
+        c.call("SET", "bt:ag:ix15", pack(rows15[1]) + b"".join(pack(x) for x in rows15[1:300]))
+        ix = jload(c.call("FRACTAL.INDEX.ENSURE", "bt:ag:ix15", "ix15", "DIM", "3", "VECTOR_FORMAT", "FP32"))
+        r.check("INDEX.ENSURE after the rows were rewritten rebuilds",
+                ix.get("action") == "rebuilt" and ix.get("generation") == 4, ix)
+        r.check("INDEX.ENSURE with a bad name is refused", r.is_err(c.call("FRACTAL.INDEX.ENSURE", "bt:ag:ix15", "bad name", "DIM", "3")))
+    else:
+        r.known("the IVF index", "this build of fractalsql-core does not carry the index")
     dm1 = c.call("FRACTAL.SEARCH.AGENT", "bt:ag:c15", "q", "4")
     r.check("SEARCH_AGENT refuses a DIM that differs from the embedding's (4 vs 3)", r.is_err(dm1, "dimensions but DIM"), str(dm1)[:120])
     dm2 = c.call("FRACTAL.AGENT.PLAN_EXPLORE", "bt:ag:c15", "q", "4", "2")
@@ -1287,19 +1431,47 @@ def gate_15(r):
 
 
 # --------------------------------------------------------------------------
-# 16 enterprise: a real enterprise library behind the daemon
+# 16 enterprise: an enterprise library behind the daemon (the real one when available, else the mock core: FSQL_ENT_KIND)
 #   FSQL_PHASE = ent | ent2 | ent3
 # --------------------------------------------------------------------------
+MOCK_ENT = os.environ.get("FSQL_ENT_KIND", "real") == "mock"     # gate 16 against the mock enterprise core, not the real library
+
+
 def gate_16(r):
+    # The enterprise gate counts ledger rows and fills a byte-capped ledger, so no mutant may append to it: no mutation here.
+    c = r.c
+    was = getattr(c, "_in_mutation", False)
+    c._in_mutation = True
+    try:
+        return _gate_16(r)
+    finally:
+        c._in_mutation = was
+
+
+def _gate_16(r):
     c = r.c
     phase = os.environ.get("FSQL_PHASE", "ent")
+    if phase == "cap":
+        # the daemon runs with FRACTALSQL_LEDGER_MAX_BYTES=400: appends fit until the file reaches the cap, then they are refused
+        pad = "x" * 80
+        res = [c.call("FRACTAL.AUDIT.LOG", "decision", '{"n":%d,"pad":"%s"}' % (i, pad)) for i in range(8)]
+        accepted = sum(1 for x in res if x == 0)
+        r.check("with FRACTALSQL_LEDGER_MAX_BYTES=400 some audit appends fit and the rest are refused", 0 < accepted < 8, str(res))
+        r.check("a refused append is a clean error, not a crash", all(x == 0 or r.is_err(x) for x in res) and r.alive(), str(res))
+        v = jload(c.call("FRACTAL.LEDGER.VERIFY", "2"))
+        r.check("the chain that was kept verifies, with exactly the rows that fit", v == {"ok": True, "rows_verified": accepted}, "%s vs %d" % (v, accepted))
+        return
     if phase == "ent":
         r.check("truth_count is 0 on a freshly loaded library (activation works)", c.call("FRACTAL.LEDGER.TRUTH.COUNT") == 0)
         r.check("shadow_count is 0", c.call("FRACTAL.LEDGER.SHADOW.COUNT") == 0)
         r.check("reset.hard succeeds (no storage touched)", c.call("FRACTAL.LEDGER.RESET.HARD") == 0)
         r.check("flush persists to the ledger file", c.call("FRACTAL.LEDGER.FLUSH") == 0)
         v = jload(c.call("FRACTAL.LEDGER.VERIFY"))
-        r.check("verify confirms the 1-row chain", v == {"ok": True, "rows_verified": 1}, str(v))
+        if MOCK_ENT:
+            # the mock core's flush writes no QTL record, so the default chain stays empty
+            r.check("verify confirms the chain (the mock core's flush writes no QTL row)", v is not None and v.get("ok") is True, str(v))
+        else:
+            r.check("verify confirms the 1-row chain", v == {"ok": True, "rows_verified": 1}, str(v))
         r.check("audit.log appends a decision record", c.call("FRACTAL.AUDIT.LOG", "portfolio_optimize", '{"k":2}') == 0)
         r.check("audit.log appends a second record", c.call("FRACTAL.AUDIT.LOG", "portfolio_optimize", '{"k":3}') == 0)
         v2 = jload(c.call("FRACTAL.LEDGER.VERIFY", "2"))
@@ -1360,9 +1532,11 @@ def gate_16(r):
         v = jload(c.call("FRACTAL.LEDGER.VERIFY"))
         r.check("the chain still verifies after the restart", v is not None and v.get("ok") is True, str(v))
     elif phase == "ent3":
-        v = jload(c.call("FRACTAL.LEDGER.VERIFY"))
+        # the tampered byte is in the newest record: the QTL record with the real core, the newest audit record with the mock core
+        v = jload(c.call("FRACTAL.LEDGER.VERIFY", "2" if MOCK_ENT else "1"))
         r.check("verify detects a byte-level tamper", v is not None and v.get("ok") is False, str(v))
-        r.check("load refuses a tampered latest record", r.is_err(c.call("FRACTAL.LEDGER.LOAD")))
+        if not MOCK_ENT:
+            r.check("load refuses a tampered latest record", r.is_err(c.call("FRACTAL.LEDGER.LOAD")))
     r.check("the server survived", r.alive())
 
 
@@ -2001,7 +2175,7 @@ def gate_18(r):
             ("text with a NUL byte", (a0[0], b"a\x00b", a0[2]) + a0[3:], "NUL"),
             ("a missing corpus key", ("bt:ag:nokey",) + a0[1:], "missing"),
             ("a dim that does not divide the corpus", (a0[0], a0[1], "3") + a0[3:], "multiple"),
-            ("an unknown option", a0 + ("BOGUS",), "wrong number" if agent == PL else "unknown option"),
+            ("an unknown option", a0 + ("BOGUS",), "unknown option"),
             ("too few arguments", a0[:2], "wrong number"),
         ):
             r.check("%s refuses %s" % (name, label), r.is_err(c.call(agent, *args), want), str(args)[:50])
@@ -2053,6 +2227,12 @@ def gate_19(r):
         r.check("the result is what valkey-search returned", res.get("total") == 3 and keys == ["d:1", "d:2", "d:3"], str(res)[:300])
         r.check("fields are returned as an object", all("age" in x.get("fields", {}) for x in res["rows"]), str(res)[:300])
         r.check("there is an analysis", bool(d.get("analysis")), str(d)[:200])
+        r.check("the engine is reported as valkey-search", d.get("engine") == "valkey-search", str(d)[:200])
+    # the same question by scan mode, over the same hashes, finds the same rows (the two engines agree)
+    ds = jload(c.call(A, "d:", "who is older than thirty?", "MODE", "SCAN"))
+    r.check("scan mode over the same hashes agrees with valkey-search", ds.get("engine") == "scan" and
+            sorted(x["key"] for x in ds["result_json"]["rows"]) == ["d:1", "d:2", "d:3"] and ds["result_json"]["total"] == 3, str(ds)[:300])
+    r.check("naming a PREFIX selects scan mode even with valkey-search loaded", jload(c.call(A, "people", "who is older than thirty?", "PREFIX", "d:")).get("engine") == "scan")
     d = jload(c.call(A, "people", "who is older than thirty?", "LIMIT", "2"))
     r.check("LIMIT caps the rows but reports the total", len(d["result_json"]["rows"]) == 2 and d["result_json"]["total"] == 3, str(d)[:200])
 
@@ -2104,6 +2284,112 @@ def gate_19(r):
     e = c4.call(A, "people", "q")
     r.check("a caller without FT.INFO is refused", r.is_err(e, "no permissions"), str(e)[:200])
     c4.close()
+    r.check("the server survived", r.alive())
+
+
+# 41 analyst scan: DATA_ANALYST without valkey-search. The model writes a JSON filter; the module scans the hashes under a key prefix, as the caller.
+def gate_41(r):
+    c = r.c
+    A = "FRACTAL.AGENT.DATA_ANALYST"
+    vec = pack([0.0, 0.0])
+    people = [(25, "ann", "london"), (31, "bob", "paris"), (47, "cy", "london"), (52, "di", "berlin")]
+    for i, (age, name, city) in enumerate(people):
+        c.call("HSET", "d:%d" % i, "age", age, "name", name, "city", city, "v", vec)
+    c.call("HSET", "x:1", "age", 99, "name", "zed", "city", "oslo")      # another prefix: never visible to a d: question
+    c.call("SET", "d:plain", "not a hash")                              # a string under the prefix: not a hash, never examined
+    base = c.call("DBSIZE")
+
+    def ask(*a):
+        out = c.call(A, *a)
+        return jload(out) if isinstance(out, (str, bytes)) else out
+
+    def rows(d):
+        return sorted(x["key"] for x in d["result_json"]["rows"])
+
+    # the basic answer, and what it reports
+    d = ask("d:", "who is older than thirty?", "MODE", "SCAN")
+    if r.check("scan mode answers", isinstance(d, dict), str(d)[:300]):
+        res = d["result_json"]
+        r.check("the engine is reported as scan", d.get("engine") == "scan", str(d)[:200])
+        r.check("the generated query is the model's filter", json.loads(d["generated_query"]) == {"field": "age", "op": ">", "value": 30}, str(d)[:200])
+        r.check("the rows are the hashes that match, under the prefix only", rows(d) == ["d:1", "d:2", "d:3"] and res["total"] == 3, str(res)[:300])
+        r.check("only the hashes under the prefix were examined (not the string, not x:1)", res["scanned"] == 4 and res["complete"] is True, str(res)[:300])
+        r.check("fields come back as an object, a vector as a placeholder", all("age" in x["fields"] for x in res["rows"]) and
+                all(str(x["fields"]["v"]).startswith("<binary") for x in res["rows"]), str(res)[:300])
+        r.check("there is an analysis", bool(d.get("analysis")), str(d)[:200])
+    d = ask("d:", "who is older than thirty?", "MODE", "SCAN", "LIMIT", "2")
+    r.check("LIMIT caps the rows but reports the total", len(d["result_json"]["rows"]) == 2 and d["result_json"]["total"] == 3, str(d)[:200])
+
+    # AUTO falls back to the scan when valkey-search is not loaded; SEARCH does not
+    d = ask("d:", "who is older than thirty?")
+    r.check("AUTO falls back to a scan when valkey-search is not loaded", isinstance(d, dict) and d.get("engine") == "scan" and rows(d) == ["d:1", "d:2", "d:3"], str(d)[:300])
+    d = ask("people", "who is older than thirty?", "PREFIX", "d:")
+    r.check("PREFIX names the keys when the index name is not a prefix", isinstance(d, dict) and d.get("engine") == "scan" and rows(d) == ["d:1", "d:2", "d:3"], str(d)[:300])
+    r.check("no hashes under a prefix is a clear error", r.is_err(c.call(A, "nosuch:", "q"), "no hashes were found under the key prefix"))
+    r.check("MODE SEARCH needs valkey-search and says so", r.is_err(c.call(A, "d:", "q", "MODE", "SEARCH"), "is not available"))
+
+    # every operator, picked out by a marker in the question
+    cases = [("ANY", ["d:0", "d:3"]), ("ALL", ["d:1", "d:2"]), ("IN", ["d:1", "d:3"]), ("PREFIX", ["d:1"]), ("CONTAINS", ["d:0", "d:2"]),
+             ("NUMEQ", ["d:2"]), ("NE", ["d:1", "d:2", "d:3"])]
+    for marker, want in cases:
+        d = ask("d:", "FRACTALSQL_BT_VKS_%s who?" % marker, "MODE", "SCAN", "MAX_ATTEMPTS", "1")
+        r.check("filter %s selects the right rows" % marker, isinstance(d, dict) and rows(d) == want, str(d)[:300])
+    d = ask("d:", "FRACTALSQL_BT_VKS_BINARY who?", "MODE", "SCAN", "MAX_ATTEMPTS", "1")
+    r.check("a text comparison against a binary field matches nothing and breaks nothing", isinstance(d, dict) and d["result_json"]["total"] == 0, str(d)[:300])
+
+    # a bad first answer is fed back and corrected
+    d = ask("d:", "FRACTALSQL_BT_VKS_RETRY who is older?", "MODE", "SCAN", "MAX_ATTEMPTS", "2")
+    r.check("a refused filter is retried with the reason", isinstance(d, dict) and rows(d) == ["d:1", "d:2", "d:3"], str(d)[:300])
+    r.check("one attempt is not enough for it", r.is_err(c.call(A, "d:", "FRACTALSQL_BT_VKS_RETRY who is older?", "MODE", "SCAN", "MAX_ATTEMPTS", "1"), "no filter that can be used"))
+
+    # hostile or malformed model output never becomes a command or a wrong answer
+    for marker, needle in [("BADJSON", "filter was rejected"), ("UNKNOWNOP", "an op must be"), ("UNKNOWNFIELD", "there is no field 'nosuch'"),
+                           ("UNKNOWNKEY", "unknown key"), ("NUMOP", "need a number"), ("DEEP", "nested too deeply"), ("LONG", "longer than 2048"),
+                           ("STACK", "text after the filter"), ("PROSE", "filter was rejected")]:
+        e = c.call(A, "d:", "FRACTALSQL_BT_VKS_%s q" % marker, "MODE", "SCAN", "MAX_ATTEMPTS", "1")
+        r.check("hostile reply %s is refused" % marker, r.is_err(e, needle), str(e)[:240])
+    r.check("no data was lost or added by any of them", c.call("DBSIZE") == base)
+    r.check("the unknown-field refusal tells the model which fields exist", r.is_err(c.call(A, "d:", "FRACTALSQL_BT_VKS_UNKNOWNFIELD q", "MODE", "SCAN", "MAX_ATTEMPTS", "1"), "the fields are"))
+
+    # argument checks
+    r.check("an unknown mode is refused", r.is_err(c.call(A, "d:", "q", "MODE", "FAST"), "MODE must be"))
+    r.check("a mode without a value is refused", r.is_err(c.call(A, "d:", "q", "MODE")))
+    r.check("a bad prefix is refused", r.is_err(c.call(A, "d:", "q", "PREFIX", "a b*"), "PREFIX may contain"))
+    r.check("an empty prefix is refused", r.is_err(c.call(A, "d:", "q", "PREFIX", ""), "PREFIX must be"))
+    r.check("a prefix with MODE SEARCH is refused", r.is_err(c.call(A, "d:", "q", "PREFIX", "d:", "MODE", "SEARCH"), "PREFIX is for"))
+    r.check("LIMIT 101 is still refused", r.is_err(c.call(A, "d:", "q", "MODE", "SCAN", "LIMIT", "101")))
+    c.call("MULTI"); c.call(A, "d:", "q", "MODE", "SCAN"); res = c.call("EXEC")
+    r.check("inside MULTI it refuses", isinstance(res, list) and r.is_err(res[0], "cannot run inside MULTI"), str(res)[:200])
+
+    # the agent adds no privilege: every command runs as the caller
+    c.call("ACL", "SETUSER", "scanner", "on", ">pw", "~d:*", "-@all", "+fractal.agent.data_analyst", "+scan", "+hgetall")
+    c.call("ACL", "SETUSER", "narrow", "on", ">pw", "~d:1", "~d:2", "-@all", "+fractal.agent.data_analyst", "+scan", "+hgetall")
+    c.call("ACL", "SETUSER", "noscan", "on", ">pw", "~d:*", "-@all", "+fractal.agent.data_analyst", "+hgetall")
+    c.call("ACL", "SETUSER", "nohget", "on", ">pw", "~d:*", "-@all", "+fractal.agent.data_analyst", "+scan")
+    def as_user(name, *a):
+        cu = Client(r.host, r.port); cu.call("AUTH", name, "pw")
+        try:
+            out = cu.call(A, *a)
+            return jload(out) if isinstance(out, (str, bytes)) else out
+        finally:
+            cu.close()
+    d = as_user("scanner", "d:", "who is older than thirty?", "MODE", "SCAN")
+    r.check("a caller with SCAN and HGETALL on the prefix is served", isinstance(d, dict) and rows(d) == ["d:1", "d:2", "d:3"], str(d)[:300])
+    d = as_user("narrow", "d:", "who is older than thirty?", "MODE", "SCAN")
+    r.check("keys the caller cannot read are invisible: the answer and the counts cover only d:1 and d:2",
+            isinstance(d, dict) and rows(d) == ["d:1", "d:2"] and d["result_json"]["total"] == 2 and d["result_json"]["scanned"] == 2, str(d)[:300])
+    r.check("a caller without SCAN is refused", r.is_err(as_user("noscan", "d:", "q", "MODE", "SCAN"), "no permissions"))
+    r.check("a caller without HGETALL sees nothing", r.is_err(as_user("nohget", "d:", "q", "MODE", "SCAN"), "no hashes were found"))
+
+    # the key budget: a large prefix is scanned in bounded steps and reported as incomplete
+    for i in range(10500):
+        c.call("HSET", "big:%d" % i, "age", i)
+    d = ask("big:", "who is older than thirty?", "MODE", "SCAN", "LIMIT", "5")
+    if r.check("a big prefix still answers", isinstance(d, dict), str(d)[:300]):
+        res = d["result_json"]
+        r.check("the scan stops at its key budget and says it is incomplete", res["complete"] is False and 10000 <= res["scanned"] <= 10200 and len(res["rows"]) == 5, str(res)[:200])
+    for i in range(10500):
+        c.call("DEL", "big:%d" % i)
     r.check("the server survived", r.alive())
 
 
@@ -2353,9 +2639,502 @@ def gate_34(r):
     r.check("the server survived", r.alive())
 
 
+# --------------------------------------------------------------------------
+# 38 precision: every SQL-visible distance is the one shared double arithmetic
+# --------------------------------------------------------------------------
+def _f32(x):
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+def _dbits(x):
+    return struct.pack("<d", x)
+
+
+def _ref_parts(a, b):
+    d = x = y = 0.0
+    for p, q in zip(a, b):
+        d += p * q
+        x += p * p
+        y += q * q
+    return d, x, y
+
+
+def _ref_cos_dist(a, b):
+    d, x, y = _ref_parts(a, b)
+    return 1.0 if x == 0.0 or y == 0.0 else 1.0 - d / (math.sqrt(x) * math.sqrt(y))
+
+
+def _ref_cos_sim(a, b):
+    d, x, y = _ref_parts(a, b)
+    return 0.0 if x == 0.0 or y == 0.0 else d / (math.sqrt(x) * math.sqrt(y))
+
+
+def _ref_l2(a, b):
+    s = 0.0
+    for p, q in zip(a, b):
+        t = p - q
+        s += t * t
+    return math.sqrt(s)
+
+
+def _ref_l2sq(a, b):
+    s = 0.0
+    for p, q in zip(a, b):
+        t = p - q
+        s += t * t
+    return s
+
+
+def _ref_norm(a):
+    s = 0.0
+    for p in a:
+        s += p * p
+    return math.sqrt(s)
+
+
+def gate_38(r):
+    """The distances accumulate in double, in a fixed sequential order, and are returned as doubles.
+
+    The reference here is the same arithmetic in Python floats (IEEE double, no fused multiply-add), so the module's
+    answers must be BIT-identical to it."""
+    c = r.c
+    rng = random.Random(7)
+
+    def unit(n):
+        v = [rng.gauss(0, 1) for _ in range(n)]
+        s = math.sqrt(sum(t * t for t in v))
+        return [_f32(t / s) for t in v]
+
+    def call(cmd, *a):
+        return float(c.call(cmd, *a))
+
+    for dim in (128, 768):
+        q = unit(dim)
+        X = [unit(dim) for _ in range(40)]
+        got = [call("FRACTAL.VECTOR.COSINE", pack(q), pack(x)) for x in X]
+        ref = [_ref_cos_dist(q, x) for x in X]
+        r.check("dim %d: the cosine distance is bit-identical to the sequential double reference" % dim,
+                all(_dbits(a) == _dbits(b) for a, b in zip(got, ref)),
+                "%r vs %r" % (got[:2], ref[:2]))
+        got_s = [call("FRACTAL.VECTOR.SIMILARITY", pack(q), pack(x)) for x in X]
+        ref_s = [_ref_cos_sim(q, x) for x in X]
+        r.check("dim %d: the cosine similarity is bit-identical" % dim,
+                all(_dbits(a) == _dbits(b) for a, b in zip(got_s, ref_s)))
+        got_d = [call("FRACTAL.VECTOR.DOT", pack(q), pack(x)) for x in X[:20]]
+        ref_d = [_ref_parts(q, x)[0] for x in X[:20]]
+        r.check("dim %d: the dot product is bit-identical" % dim,
+                all(_dbits(a) == _dbits(b) for a, b in zip(got_d, ref_d)))
+        got_l = [call("FRACTAL.VECTOR.L2", pack(q), pack(x)) for x in X[:20]]
+        ref_l = [_ref_l2(q, x) for x in X[:20]]
+        r.check("dim %d: the L2 distance is bit-identical" % dim,
+                all(_dbits(a) == _dbits(b) for a, b in zip(got_l, ref_l)),
+                "%r vs %r" % (got_l[:2], ref_l[:2]))
+        got_ls = [call("FRACTAL.VECTOR.L2SQ", pack(q), pack(x)) for x in X[:20]]
+        ref_ls = [_ref_l2sq(q, x) for x in X[:20]]
+        r.check("dim %d: the squared L2 distance is bit-identical" % dim,
+                all(_dbits(a) == _dbits(b) for a, b in zip(got_ls, ref_ls)),
+                "%r vs %r" % (got_ls[:2], ref_ls[:2]))
+        n = call("FRACTAL.VECTOR.NORM", pack(q))
+        r.check("dim %d: the norm is bit-identical" % dim, _dbits(n) == _dbits(_ref_norm(q)), repr(n))
+
+    # an adversarial near-tie set: the ordering must match the reference exactly
+    dim = 256
+    base = unit(dim)
+    q = unit(dim)
+    cand = [[_f32(b + (rng.random() - 0.5) * 2e-7) for b in base] for _ in range(120)]
+    got = [call("FRACTAL.VECTOR.COSINE", pack(q), pack(x)) for x in cand]
+    ref = [_ref_cos_dist(q, x) for x in cand]
+    r.check("near-ties: the full ranking by the module's distance equals the reference ranking",
+            sorted(range(len(cand)), key=lambda i: (got[i], i)) == sorted(range(len(cand)), key=lambda i: (ref[i], i)))
+    r.check("near-ties: the candidates really are near-ties", len(set(ref)) > 90, len(set(ref)))
+
+    # the text round trip is bit-identical for float32
+    bad = 0
+    for _ in range(100):
+        v = [_f32(rng.uniform(-1e3, 1e3) * 10 ** rng.randint(-8, 3)) for _ in range(rng.randint(1, 24))]
+        txt = c.call("FRACTAL.VECTOR.TOTEXT", pack(v))
+        back = c.call("FRACTAL.VECTOR.FROMTEXT", txt)
+        if back != pack(v):
+            bad += 1
+    r.check("the vector -> text -> vector round trip is bit-identical for 100 random float32 vectors", bad == 0, bad)
+
+    # the documented conventions for a degenerate input
+    z, v = pack([0.0] * 8), pack([1.0] * 8)
+    r.check("a zero vector has a cosine distance of 1.0 (not NaN)",
+            call("FRACTAL.VECTOR.COSINE", z, v) == 1.0)
+    r.check("a zero vector has a cosine similarity of 0.0",
+            call("FRACTAL.VECTOR.SIMILARITY", z, v) == 0.0)
+    r.check("a dimension mismatch is refused", r.is_err(c.call("FRACTAL.VECTOR.COSINE", v, pack([1.0] * 3))))
+    r.check("the server survived", r.alive())
+
+
+def gate_39_auto_small(r):
+    """agent-use-index auto with the default agent-index-min-rows (10000): a 2000-row key is below it, so the agents scan exactly even
+    though a ready index exists."""
+    c = r.c
+    key = "bt39s:corpus"
+    dim, rows = 16, 2000
+    rng = random.Random(31)
+    data = [[rng.gauss(0, 1) for _ in range(dim)] for _ in range(rows)]
+    c.call("SET", key, b"".join(pack(row) for row in data))
+    out = c.call("FRACTAL.INDEX.CREATE", key, "bt39s", "DIM", str(dim), "VECTOR_FORMAT", "FP32")
+    if r.is_err(out):
+        r.known("the IVF index", "this build of fractalsql-core does not carry the index")
+        return
+    rt = jload(c.call("FRACTAL.AGENT.ROUTE_TASK", key, pack(data[7]), "500"))
+    r.check("auto with a key below agent-index-min-rows: route_task scans exactly", isinstance(rt, dict) and rt.get("routed_to") == "7", rt)
+    info = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39s"))
+    r.check("auto with a key below agent-index-min-rows never touches the index", (info.get("last_search") or {}).get("used_index") is not True, info)
+    r.check("the server survived", r.alive())
+
+
+def gate_39_agents(r):
+    """agent_use_index (the agent-use-index load option, off by default): route_task, schedule_workload and outlier_intercept search
+    through a fractal_index when one exists on the key, and answer exactly as the scan does. The server runs with the option on."""
+    c = r.c
+    key = "bt39a:corpus"
+    dim, rows, clusters = 16, 2000, 20
+    rng = random.Random(23)
+    cent = [[rng.gauss(0, 1) for _ in range(dim)] for _ in range(clusters)]
+    data = [[x + 0.3 * rng.gauss(0, 1) for x in rng.choice(cent)] for _ in range(rows)]
+    c.call("SET", key, b"".join(pack(row) for row in data))
+    q = pack(data[41])
+
+    # no index yet: the option is on but there is nothing to search through, so the agent scans exactly
+    plain = jload(c.call("FRACTAL.AGENT.ROUTE_TASK", key, q, "500"))
+    r.check("agent_use_index on with no index: route_task still answers by the exact scan",
+            isinstance(plain, dict) and plain.get("routed_to") == "41", plain)
+
+    out = c.call("FRACTAL.INDEX.CREATE", key, "bt39a", "DIM", str(dim), "VECTOR_FORMAT", "FP32")
+    if r.is_err(out):
+        if "does not carry the IVF index" in str(out):
+            r.known("the IVF index", "this build of fractalsql-core does not carry the index")
+            return
+        r.bad("create the index", str(out))
+        return
+    info0 = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39a"))
+    r.check("no agent has searched through the index yet", (info0.get("last_search") or {}).get("used_index") is not True, info0)
+
+    rt = jload(c.call("FRACTAL.AGENT.ROUTE_TASK", key, q, "500"))
+    r.check("route_task through the index finds the same row as the scan", isinstance(rt, dict) and rt.get("routed_to") == plain.get("routed_to"), rt)
+    r.check("route_task through the index reports the same exact confidence",
+            isinstance(rt, dict) and abs(rt.get("confidence", 0) - plain.get("confidence", -1)) < 1e-9, (rt, plain))
+    info1 = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39a"))
+    ls = info1.get("last_search") or {}
+    r.check("the agent really went through the index (FRACTAL.INDEX.INFO records the search)",
+            ls.get("used_index") is True and 0 < ls.get("rows_scanned", 0) < rows, info1)
+
+    sw = jload(c.call("FRACTAL.AGENT.SCHEDULE_WORKLOAD", key, q))
+    r.check("schedule_workload through the index assigns the matching row", isinstance(sw, dict) and sw.get("assigned_node") == "41", sw)
+    oi = jload(c.call("FRACTAL.AGENT.OUTLIER_INTERCEPT", key, q, "0.5"))
+    r.check("outlier_intercept (cosine) through the index intercepts a state that is in the history",
+            isinstance(oi, dict) and oi.get("intercepted") is True and oi.get("nearest_distance", 1) < 1e-6, oi)
+    oi2 = jload(c.call("FRACTAL.AGENT.OUTLIER_INTERCEPT", key, q, "0.5", "METRIC", "l2"))
+    r.check("outlier_intercept with METRIC l2 still scans exactly", isinstance(oi2, dict) and oi2.get("metric") == "l2", oi2)
+
+    # recall_hybrid goes through the index too, and INDEX <name> picks the index; the answer is the exact nearest rows
+    def cos_dist(u, v):
+        du = sum(x * x for x in u) ** 0.5
+        dv = sum(x * x for x in v) ** 0.5
+        return 1.0 - sum(x * y for x, y in zip(u, v)) / (du * dv)
+    want5 = [str(i) for i in sorted(range(rows), key=lambda i: cos_dist(data[i], data[41]))[:5]]
+    rh = jload(c.call("FRACTAL.AGENT.RECALL_HYBRID", key, q, "K", "5"))
+    got = [str(x.get("mem_id")) for x in rh] if isinstance(rh, list) else rh
+    r.check("recall_hybrid through the index returns the exact nearest rows", got == want5, (got, want5))
+    info2 = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39a"))
+    ls2 = info2.get("last_search") or {}
+    r.check("recall_hybrid really went through the index (FRACTAL.INDEX.INFO records the search)",
+            ls2.get("used_index") is True and 0 < ls2.get("rows_scanned", 0) < rows, info2)
+    rh2 = jload(c.call("FRACTAL.AGENT.RECALL_HYBRID", key, q, "K", "5", "INDEX", "bt39a"))
+    r.check("INDEX <name> on recall_hybrid names the index and answers the same",
+            isinstance(rh2, list) and [str(x.get("mem_id")) for x in rh2] == want5, rh2)
+    rt3 = jload(c.call("FRACTAL.AGENT.ROUTE_TASK", key, q, "500", "INDEX", "bt39a"))
+    r.check("INDEX <name> on route_task names the index and answers the same", isinstance(rt3, dict) and rt3.get("routed_to") == "41", rt3)
+    r.check("INDEX <name> that does not exist is an error, not a silent scan",
+            r.is_err(c.call("FRACTAL.AGENT.RECALL_HYBRID", key, q, "K", "5", "INDEX", "no_such_index"), "no usable index"))
+    r.check("INDEX <name> is refused by an agent that does not search through an index",
+            r.is_err(c.call("FRACTAL.AGENT.RECOMMEND_DIVERSE", key, q, "INDEX", "bt39a"), "unknown option"))
+
+    # a row appended after the build is not in the cells; the agent must still see it
+    newrow = [rng.gauss(0, 5) for _ in range(dim)]
+    c.call("APPEND", key, pack(newrow))
+    rt2 = jload(c.call("FRACTAL.AGENT.ROUTE_TASK", key, pack(newrow), "500"))
+    r.check("a row appended after the build is found by the agent (the delta is scanned exactly)",
+            isinstance(rt2, dict) and rt2.get("routed_to") == str(rows), rt2)
+    # the table-free convergence command: no key, no daemon
+    sc = jload(c.call("FRACTAL.SFS.CONVERGE", pack([1.0, 0.0, 0.0]), "ITERATIONS", "5", "POPULATION", "8", "DIFFUSION", "2"))
+    r.check("SFS.CONVERGE answers {dim, population_size, best_point, best_fit} with no trace",
+            isinstance(sc, dict) and sc.get("dim") == 3 and sc.get("population_size") == 8 and len(sc.get("best_point", [])) == 3
+            and isinstance(sc.get("best_fit"), (int, float)) and "paths" not in sc, sc)
+    sc2 = jload(c.call("FRACTAL.SFS.CONVERGE", pack([0.0, 1.0, 0.0])))
+    r.check("SFS.CONVERGE works with the default tuning", isinstance(sc2, dict) and sc2.get("dim") == 3 and sc2.get("population_size") == 50, sc2)
+    r.check("SFS.CONVERGE refuses an unknown option", r.is_err(c.call("FRACTAL.SFS.CONVERGE", pack([1.0, 0.0, 0.0]), "BOGUS", "1"), "unknown option"))
+    r.check("SFS.CONVERGE refuses a missing value", r.is_err(c.call("FRACTAL.SFS.CONVERGE", pack([1.0, 0.0, 0.0]), "ITERATIONS"), "needs a value"))
+    r.check("SFS.CONVERGE refuses an out-of-range population", r.is_err(c.call("FRACTAL.SFS.CONVERGE", pack([1.0, 0.0, 0.0]), "POPULATION", "1")))
+    r.check("SFS.CONVERGE refuses a query that is not a vector blob", r.is_err(c.call("FRACTAL.SFS.CONVERGE", b"abc")))
+    r.check("the server survived", r.alive())
+
+
+# --------------------------------------------------------------------------
+# 39 the native IVF index
+# --------------------------------------------------------------------------
+def gate_39(r):
+    """FRACTAL.INDEX.CREATE / .REBUILD / .DROP / .INFO and the indexed FRACTAL.SEARCH.
+
+    Covers: the build, the metadata, the "index actually used" check (the rows scanned by the index are far below the
+    corpus), the exact distances (the index never returns an approximate distance), the staleness of a changed corpus,
+    the rebuild (a new generation), the drop, and the hostile input."""
+    if os.environ.get("FSQL_PHASE") == "agents":
+        return gate_39_agents(r)
+    if os.environ.get("FSQL_PHASE") == "autosmall":
+        return gate_39_auto_small(r)
+    c = r.c
+    key = "bt39:corpus"
+    dim, rows, clusters = 16, 2000, 20
+    rng = random.Random(11)
+    cent = [[rng.gauss(0, 1) for _ in range(dim)] for _ in range(clusters)]
+    data = [[x + 0.3 * rng.gauss(0, 1) for x in rng.choice(cent)] for _ in range(rows)]
+    blob = b"".join(pack(row) for row in data)
+    c.call("SET", key, blob)
+
+    out = c.call("FRACTAL.INDEX.CREATE", key, "bt39", "DIM", str(dim), "VECTOR_FORMAT", "FP32")
+    if r.is_err(out):
+        if "does not carry the IVF index" in str(out):
+            r.known("the IVF index", "this build of fractalsql-core does not carry the index; "
+                                     "rebuild the core and refresh include/<platform>")
+            r.check("the index commands are registered even without the core's IVF maths",
+                    r.is_err(c.call("FRACTAL.INDEX.INFO", key, "bt39"), "IVF index"))
+            r.check("the server survived", r.alive())
+            return
+        r.bad("create the index", str(out))
+        return
+    info = jload(out)
+    r.check("the build reports the rows, the dimension, the format and the first generation",
+            info.get("rows") == rows and info.get("dim") == dim and info.get("format") == "FP32"
+            and info.get("generation") == 1, info)
+
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    r.check("info reports the index and is not stale yet",
+            meta.get("name") == "bt39" and meta.get("rows_indexed") == rows and meta.get("stale") is False, meta)
+
+    q = pack(data[3])
+
+    # the "index actually used" check: one probed cell reads a small part of the corpus
+    fast = jload(c.call("FRACTAL.SEARCH", key, q, 10, "INDEX", "bt39", "NPROBE", "1"))
+    r.check("the indexed search answers", isinstance(fast, dict) and "top_k" in fast, fast)
+    r.check("the index was actually used", fast.get("used_index") is True, fast)
+    r.check("the index scanned far fewer rows than the corpus holds (the index is really used)",
+            isinstance(fast.get("rows_scanned"), int) and 0 < fast["rows_scanned"] < rows // 10,
+            "rows_scanned=%r of %d" % (fast.get("rows_scanned"), rows))
+    r.check("the index probed at least one cell", fast.get("cells_probed", 0) >= 1, fast)
+    r.check("the indexed search returns k rows", len(fast.get("top_k", [])) == 10, fast.get("top_k"))
+
+    # the default (calibrated) nprobe
+    res = jload(c.call("FRACTAL.SEARCH", key, q, 10, "INDEX", "bt39"))
+    r.check("the indexed search at the calibrated nprobe scans fewer rows than the corpus",
+            isinstance(res.get("rows_scanned"), int) and 0 < res["rows_scanned"] < rows,
+            "rows_scanned=%r of %d" % (res.get("rows_scanned"), rows))
+
+    # every distance is exact: the index's verified distance is the module's own cosine, bit for bit
+    exact = jload(c.call("FRACTAL.SEARCH", key, q, 10, "USE_INDEX", 0))
+    r.check("the exact scan scanned every row", exact.get("used_index") is False
+            and exact.get("rows_scanned") == rows, exact.get("rows_scanned"))
+    bad = []
+    for row in res.get("top_k", []):
+        vec = float(c.call("FRACTAL.VECTOR.COSINE", q, pack(data[row["idx"]])))
+        if _dbits(vec) != _dbits(row["dist"]):
+            bad.append((row["idx"], vec, row["dist"]))
+    r.check("every distance the index returned is exact (bit-identical to FRACTAL.VECTOR.COSINE)",
+            not bad, bad[:3])
+
+    # the answer is the exact one (the calibrated nprobe targets a high recall)
+    emap = {row["idx"]: row["dist"] for row in exact.get("top_k", [])}
+    hit = len([row for row in res.get("top_k", []) if row["idx"] in emap])
+    r.check("the indexed answer agrees with the exact scan", hit >= 8, "%d of 10" % hit)
+    r.check("the indexed distances of the shared rows are bit-identical to the exact scan's",
+            all(_dbits(row["dist"]) == _dbits(emap[row["idx"]])
+                for row in res.get("top_k", []) if row["idx"] in emap),
+            [row["dist"] for row in res.get("top_k", [])][:3])
+
+    # the query row is its own nearest neighbour
+    one = res.get("top_k", [{}])[0]
+    r.check("the query row is its own nearest neighbour",
+            one["idx"] == 3 and one["dist"] < 1e-9, one)
+
+    # rows appended after the build: the status says so, and the search still sees them
+    nv = [rng.gauss(0, 1) for _ in range(dim)]
+    dq = pack(nv)
+    c.call("SET", key, blob + dq)
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    r.check("info reports the index as stale when rows were appended", meta.get("stale") is True, meta)
+    r.check("the status is stale with one row added and a refresh is advised",
+            meta.get("status") == "stale" and meta.get("rows_added_since_build") == 1 and meta.get("has_delta") is True
+            and meta.get("rows_now") == rows + 1 and any("refresh" in a for a in meta.get("advice", [])), meta)
+    lst = jload(c.call("FRACTAL.INDEX.LIST", key))
+    r.check("the list shows the index with its status and the current row count",
+            len(lst) == 1 and lst[0].get("name") == "bt39" and lst[0].get("status") == "stale"
+            and lst[0].get("rows") == rows and lst[0].get("rows_now") == rows + 1 and lst[0].get("stale") is True, lst)
+    r.check("the list of a corpus with no index is empty", jload(c.call("FRACTAL.INDEX.LIST", key + ":none")) == [])
+    d = jload(c.call("FRACTAL.SEARCH", key, dq, 5, "INDEX", "bt39", "NPROBE", 1))
+    r.check("the appended row is found through the index (the rows after the build are scanned exactly)",
+            d.get("used_index") is True and d["top_k"][0]["idx"] == rows and d["top_k"][0]["dist"] < 1e-9, d)
+    cands = jload(c.call("FRACTAL.INDEX.CANDIDATES", key, dq, "INDEX", "bt39", 5, "NPROBE", 1))
+    r.check("the candidates are the nearest positions, the appended row first",
+            isinstance(cands, list) and len(cands) == 5 and cands[0] == rows, cands)
+    r.check("candidates without an index name are refused", r.is_err(c.call("FRACTAL.INDEX.CANDIDATES", key, dq, 5)))
+
+    # IDS: the search restricted to a set of positions
+    ex = jload(c.call("FRACTAL.SEARCH", key, q, 5, "IDS", "3,7,9,%d,99999" % rows))
+    r.check("a short IDS set is an exact scan of just those rows (an unknown position is ignored)",
+            ex.get("used_index") is False and ex.get("rows_scanned") == 4
+            and {t["idx"] for t in ex["top_k"]} == {3, 7, 9, rows} and ex["top_k"][0]["idx"] == 3, ex)
+    ex = jload(c.call("FRACTAL.SEARCH", key, q, 5, "INDEX", "bt39", "IDS", "[3, 7, 9]"))
+    r.check("a short IDS set with an index is still exact, and a JSON array is accepted",
+            ex.get("used_index") is False and {t["idx"] for t in ex["top_k"]} == {3, 7, 9}, ex)
+    ex = jload(c.call("FRACTAL.SEARCH", key, q, 5, "IDS", ""))
+    r.check("an empty IDS set returns no rows", ex.get("top_k") == [], ex)
+    r.check("a malformed IDS set is refused", r.is_err(c.call("FRACTAL.SEARCH", key, q, 5, "IDS", "3,x")))
+    big = ",".join(str(i) for i in range(rows + 1)) + "," + ",".join(str(i) for i in range(10000, 14500))
+    ex = jload(c.call("FRACTAL.SEARCH", key, q, 5, "INDEX", "bt39", "IDS", big))
+    r.check("a long IDS set goes through the index and is filtered", ex.get("used_index") is True
+            and ex["top_k"][0]["idx"] == 3 and len(ex["top_k"]) == 5, ex)
+    sparse = ",".join(str(i) for i in range(1000, 6000))
+    ex = jload(c.call("FRACTAL.SEARCH", key, q, 5, "INDEX", "bt39", "NPROBE", 1, "IDS", sparse))
+    r.check("when the index shortlist leaves fewer than k rows of the set, the set is scanned exactly",
+            len(ex["top_k"]) == 5, ex)
+
+    # refresh folds the appended rows in without retraining, as a new generation
+    rf = jload(c.call("FRACTAL.INDEX.REFRESH", key, "bt39"))
+    r.check("the refresh reports the rows it added and the new generation",
+            rf.get("added") == 1 and rf.get("rows") == rows + 1 and rf.get("generation") == 2 and rf.get("refreshed") is True, rf)
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    r.check("after the refresh the index is ready and covers the appended row",
+            meta.get("status") == "ready" and meta.get("stale") is False and meta.get("rows_indexed") == rows + 1
+            and meta.get("generation") == 2 and meta.get("rows_added_since_build") == 0, meta)
+    d = jload(c.call("FRACTAL.SEARCH", key, dq, 5, "INDEX", "bt39", "NPROBE", 1))
+    r.check("the refreshed row is answered from its cell", d["top_k"][0]["idx"] == rows and d["top_k"][0]["dist"] < 1e-9, d)
+    rf = jload(c.call("FRACTAL.INDEX.REFRESH", key, "bt39"))
+    r.check("a second refresh has nothing to add and keeps the generation",
+            rf.get("refreshed") is False and rf.get("added") == 0 and rf.get("generation") == 2, rf)
+    r.check("the refresh of a missing index is refused", r.is_err(c.call("FRACTAL.INDEX.REFRESH", key, "nope")))
+    old = [c.call("EXISTS", key + ":fsql-idx:bt39:" + part) for part in ("meta:1", "model:1", "cell:1:0")]
+    r.check("the refresh removes the generation it replaced", old == [0, 0, 0], old)
+
+    # a rewritten row cannot be refreshed: it needs a rebuild
+    c.call("SET", key, pack(data[1]) + blob[dim * 4:] + dq)
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    r.check("a rewritten corpus is stale and a rebuild is advised",
+            meta.get("status") == "stale" and meta.get("stale") is True and any("rebuild" in a for a in meta.get("advice", [])), meta)
+    r.check("the refresh of a rewritten corpus is refused and points to the rebuild",
+            r.is_err(c.call("FRACTAL.INDEX.REFRESH", key, "bt39"), "REBUILD"))
+
+    # the index outlives its corpus: orphaned
+    c.call("DEL", key)
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    r.check("an index whose corpus key is gone is orphaned", meta.get("status") == "orphaned" and meta.get("corpus_present") is False, meta)
+    lst = jload(c.call("FRACTAL.INDEX.LIST", key))
+    r.check("the list shows it as orphaned", len(lst) == 1 and lst[0].get("status") == "orphaned", lst)
+    c.call("SET", key, blob + dq)
+
+    out = c.call("FRACTAL.INDEX.REBUILD", key, "bt39")
+    r.check("the rebuild answers", not r.is_err(out), str(out))
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    reached = (meta.get("calibration") or {}).get("reaches_target")
+    r.check("the rebuild produces a new generation and nothing is stale; the status follows the calibration",
+            meta.get("generation") == 3 and meta.get("stale") is False
+            and meta.get("status") == ("ready" if reached else "degraded"), meta)
+    out = c.call("FRACTAL.INDEX.REBUILD", key, "bt39", "VECTOR_FORMAT", "FP32")
+    meta = jload(c.call("FRACTAL.INDEX.INFO", key, "bt39"))
+    r.check("an FP32 rebuild is ready", not r.is_err(out) and meta.get("generation") == 4 and meta.get("status") == "ready", meta)
+
+    # hostile input
+    r.check("an unknown option is refused", r.is_err(c.call("FRACTAL.INDEX.CREATE", key, "bt39b", "DIM", str(dim), "NOPE", 1)))
+    r.check("an unknown vector format is refused",
+            r.is_err(c.call("FRACTAL.INDEX.CREATE", key, "bt39c", "DIM", str(dim), "VECTOR_FORMAT", "PQ4")))
+    r.check("a missing DIM is refused", r.is_err(c.call("FRACTAL.INDEX.CREATE", key, "bt39d")))
+    r.check("a duplicate index name is refused",
+            r.is_err(c.call("FRACTAL.INDEX.CREATE", key, "bt39", "DIM", str(dim)), "already exists"))
+    r.check("info of a missing index is refused", r.is_err(c.call("FRACTAL.INDEX.INFO", key, "nope")))
+    r.check("a rebuild of a missing index is refused", r.is_err(c.call("FRACTAL.INDEX.REBUILD", key, "nope")))
+    r.check("an index name that is not an identifier is refused",
+            r.is_err(c.call("FRACTAL.INDEX.INFO", key, "x; drop table t; --")))
+
+    # drop
+    r.check("drop answers 1", c.call("FRACTAL.INDEX.DROP", key, "bt39") == 1)
+    r.check("info after the drop is refused", r.is_err(c.call("FRACTAL.INDEX.INFO", key, "bt39")))
+    left = c.call("KEYS", key + ":fsql-idx:*")
+    r.check("the drop removes the index keys", left == [], left)
+
+    # every VECTOR_FORMAT: build, recall at every cell, exact distances, really used. INT8 and INT4 keep a compressed code and re-check the
+    # shortlist against the corpus; FP16 and FP32 keep (almost) the whole vector.
+    truth10 = [row["idx"] for row in jload(c.call("FRACTAL.SEARCH", key, q, 10, "USE_INDEX", 0)).get("top_k", [])]
+    for fmt, floor in (("INT8", 0.40), ("INT4", 0.40), ("FP16", 0.98), ("FP32", 0.99)):
+        name = "bt39f" + fmt.lower()
+        made = c.call("FRACTAL.INDEX.CREATE", key, name, "DIM", str(dim), "NLIST", "16", "VECTOR_FORMAT", fmt)
+        if r.is_err(made):
+            r.bad("create a %s index" % fmt, str(made))
+            continue
+        info = jload(made)
+        r.check("%s: the index builds and reports its format and rows" % fmt, info.get("format") == fmt and info.get("rows", 0) >= rows, info)
+        full = jload(c.call("FRACTAL.SEARCH", key, q, 10, "INDEX", name, "NPROBE", "16"))
+        hit = len({row["idx"] for row in full.get("top_k", [])} & set(truth10)) / 10.0
+        r.check("%s: recall@10 at every cell is at least %.2f (got %.2f)" % (fmt, floor, hit), hit >= floor, full.get("top_k"))
+        bad = [(row["idx"], row["dist"]) for row in full.get("top_k", [])
+               if _dbits(float(c.call("FRACTAL.VECTOR.COSINE", q, pack(data[row["idx"]])))) != _dbits(row["dist"])]
+        r.check("%s: every returned distance is the exact cosine (bit-identical)" % fmt, len(full.get("top_k", [])) == 10 and not bad, bad[:3])
+        few = jload(c.call("FRACTAL.SEARCH", key, q, 10, "INDEX", name, "NPROBE", "2"))
+        r.check("%s: a search at nprobe 2 goes through the index and scans fewer rows than the corpus" % fmt,
+                few.get("used_index") is True and isinstance(few.get("rows_scanned"), int) and 0 < few["rows_scanned"] < rows, few)
+        c.call("FRACTAL.INDEX.DROP", key, name)
+    r.check("the server survived", r.alive())
+    c.call("DEL", key)
+
+
+# --------------------------------------------------------------------------
+# 40 the naming surface: the table-free convergence function was renamed
+# --------------------------------------------------------------------------
+def gate_40(r):
+    """fractal_search was renamed fractal_sfs_converge (and fractal_search_debug to fractal_sfs_converge_debug).
+
+    The old names are NOT aliases: they stay registered only so that a call fails with a message that names the new
+    function. This gate is a source-level check of that contract (the daemon's function registry, the SQL registration
+    and the failing stub)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def read(rel):
+        path = os.path.join(root, rel)
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError as e:
+            r.bad("read %s" % rel, str(e))
+            return ""
+
+    defs = read(os.path.join("service", "protocol", "functions.def"))
+    sql = read(os.path.join("service", "adapter", "sql", "install_udf.sql"))
+    src = read(os.path.join("service", "adapter", "src", "fractalsql.c"))
+
+    r.check("the daemon's function registry has fractal_sfs_converge",
+            "X(fractal_sfs_converge," in defs, defs[:200])
+    r.check("the daemon's function registry has fractal_sfs_converge_debug",
+            "X(fractal_sfs_converge_debug," in defs)
+    r.check("the old names stay registered (they are the failing stubs, not aliases)",
+            "X(fractal_search," in defs and "X(fractal_search_debug," in defs)
+    r.check("the SQL registers fractal_sfs_converge and fractal_sfs_converge_debug",
+            "CREATE FUNCTION fractal_sfs_converge" in sql and "CREATE FUNCTION fractal_sfs_converge_debug" in sql)
+    r.check("the SQL keeps the old names registered so a call fails with a message",
+            "CREATE FUNCTION fractal_search " in sql and "CREATE FUNCTION fractal_search_debug " in sql)
+    r.check("the adapter defines fractal_sfs_converge and its debug twin",
+            "fractal_sfs_converge(UDF_INIT" in src and "fractal_sfs_converge_debug(UDF_INIT" in src)
+    r.check("the adapter's old names are failing stubs that name the new function",
+            "fractal_search_init" in src and "was renamed" in src and "fractal_sfs_converge" in src)
+    r.check("the server survived", r.alive())
+
+
 GATES = {"02": gate_02, "03": gate_03, "04": gate_04, "05": gate_05,
          "06": gate_06, "07": gate_07, "08": gate_08, "09": gate_09, "10": gate_10,
-         "11": gate_11, "12": gate_12, "13": gate_13, "15": gate_15, "16": gate_16, "18": gate_18, "19": gate_19, "20": gate_20, "33": gate_33, "34": gate_34}
+         "11": gate_11, "12": gate_12, "13": gate_13, "15": gate_15, "16": gate_16, "18": gate_18, "19": gate_19, "20": gate_20, "41": gate_41, "33": gate_33, "34": gate_34,
+         "38": gate_38, "39": gate_39, "40": gate_40}
 
 
 def main():

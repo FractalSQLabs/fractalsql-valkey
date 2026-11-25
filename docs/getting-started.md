@@ -57,6 +57,9 @@ pack = lambda v: struct.pack("<%df" % len(v), *v)
 ```
 
 - **`FRACTAL.SEARCH`** (Sniper) returns the nearest rows, ranked by **cosine distance**.
+  It can also search an index: build one with `FRACTAL.INDEX.CREATE` and pass
+  `INDEX <name>` to the search. The distances stay exact -- the index only chooses
+  which rows to look at. See [Discovery](api-discovery.md).
 - **`FRACTAL.EXPLORE`** (Scout) disperses a population across distinct regions near the
   query: coverage, not nearest-match. A bigger population reaches further afield.
 
@@ -160,7 +163,7 @@ Load-time options (all optional): `threads N` (worker threads, default 4),
 `max-inflight-mb M` (cap on decoded input held by running jobs, default 1024),
 `daemon-socket PATH`, `daemon-key-file PATH`, `daemon-timeout-s N`,
 `max-sessions N` (live diversify sessions, default 64), `session-ttl-sec N` (idle sessions are dropped after this, default 3600, 0 = never),
-`agent-partial-reasoning-fail yes|no`.
+`agent-partial-reasoning-fail yes|no`, `agent-use-index yes|no|auto` (default `no`; `auto` searches through an index only when it is ready and the key has at least `agent-index-min-rows` rows, default 10000, a second option, 0 to 2000000: with `yes`, `FRACTAL.AGENT.ROUTE_TASK`, `SCHEDULE_WORKLOAD` and `OUTLIER_INTERCEPT` search through a `FRACTAL.INDEX` of the key when one exists).
 
 ## Where next
 

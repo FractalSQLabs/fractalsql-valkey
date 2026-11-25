@@ -90,6 +90,23 @@ Returns `{"indices":[...]}`.
 {"indices":[150]}
 ```
 
+### `FRACTAL.TEXT.CHUNK`
+**Split long text into chunks (pure, no model)**
+
+```
+FRACTAL.TEXT.CHUNK text size overlap [mode]
+```
+
+Splits `text` into chunks of at most `size` characters and returns a JSON array of `{"no","start","end","text"}`. `start` and `end` are character offsets into the original text (`end` is exclusive), and `text` is that slice. Characters are UTF-8 code points, not bytes. `size` is 1 to 100000, `overlap` is 0 to `size - 1`, the text at most 4 MiB, and at most 100000 chunks are produced. An empty or blank text gives `[]`.
+
+| `mode` | How the text is cut |
+| --- | --- |
+| `paragraph` (the default) | At paragraph breaks (a run of blanks that contains at least two line feeds). Whole paragraphs are packed into a chunk while it stays within `size`. |
+| `sentence` | After a run of `.`, `!` or `?` that is followed by whitespace or the end. Whole sentences are packed the same way; a paragraph break also ends a sentence. |
+| `fixed` | Every `size - overlap` characters, ignoring the text's structure. |
+
+A paragraph or sentence longer than `size` is cut like a fixed span, and neighbouring pieces share `overlap` characters. `overlap` applies only to such cuts and to `fixed`. The size is in characters, not tokens: pick it a little under your embedding model's limit. The same function, with the same output, is available on every FractalSQL host. Valkey stores no table of chunks for you: write each chunk's vector into a corpus key (or one key per document) from your client.
+
 ### `FRACTAL.SERIES.PERIODOGRAM`
 
 Exact power spectrum (a direct DFT) for cadence detection, such as network beaconing or retry loops.
@@ -265,6 +282,25 @@ Returns `{"sharpe","weights":[...]}`.
 {"sharpe":1.0567622504,"weights":[0.0,0.3130193854,0.0,0.4044321458,0.0,0.2825484688]}
 ```
 
+### `FRACTAL.OPTIMIZE.SUBSET`
+
+Value-weighted k-subset allocation over any scored list of items: pick at most `k` items and weight them to maximise the total value, with a cap on each item's weight. It is the general form of the portfolio optimiser, for budgets, slots, nodes and any other "choose a few and split the total" problem.
+
+```
+FRACTAL.OPTIMIZE.SUBSET item_values upper_bounds k [PREV prev_weights] [TURNOVER penalty] [SEED n]
+```
+
+- `item_values`: what each item is worth, `n` values. `upper_bounds`: the most weight each item may take, `n` values, each 0 to 1.
+- `k`: 1 to `n`. At most `k` weights are nonzero, each at most its upper bound, and they sum to 1. The `k` largest upper bounds must add up to at least 1. `n x k` may not exceed 16,777,216.
+- `PREV` and `TURNOVER`: the current weights and a cost for changing them, for rebalancing: the search steers away from reallocating. `SEED`: the same seed returns the same allocation.
+
+Returns `{"score","weights":[...]}`, where `score` is the value-weighted total achieved.
+
+```
+> FRACTAL.OPTIMIZE.SUBSET values bounds 2 SEED 7
+{"score":0.8571428571,"weights":[0.5714285714,0.0,0.0,0.4285714286,0.0,0.0]}
+```
+
 ### `FRACTAL.OPTIMIZE.MULTIMODAL` and `FRACTAL.OPTIMIZE.MULTIMODAL.PARETO` (Enterprise)
 
 Several structurally different portfolios instead of one. They run in the enterprise library, which only `fractalsqld` loads, so on a
@@ -286,6 +322,17 @@ Returns `{"n_found":N,"candidates":[{"sharpe","weights"}, ...]}` (the Pareto for
 
 Store a document's feature vector in a string key or a hash of its own, and search it with `FRACTAL.SEARCH`.
 
+For a per-`doc_id` store of custom metadata or flagged examples, two commands keep the vectors in one hash (`doc_id` is the field, the packed float32 vector the value):
+
+```
+FRACTAL.FEATURE.STORE key doc_id vector
+FRACTAL.FEATURE.MINE  key surrogate_vector k
+```
+
+`FRACTAL.FEATURE.STORE` is an upsert (the last write wins) and answers `OK`; `doc_id` is 0 or more. `FRACTAL.FEATURE.MINE` is a brute-force scan of the hash by true Euclidean distance and returns
+`[{"doc_id":..,"distance":..}]`, nearest first. A stored vector of another dimension is skipped, and a missing key gives `[]`. The hash is an ordinary key, so ACLs, expiry, replication and persistence apply to it as to any other.
+The MCP tools are `fractal_store_morphology` and `fractal_mine_topology_negatives`.
+
 ## Vector Math and Quantization
 
 ### The canonical vector form
@@ -298,6 +345,8 @@ core's documented convention), never NaN.
 | Command | Returns |
 | --- | --- |
 | `FRACTAL.VECTOR.DOT a b` · `L2 a b` · `L2SQ a b` · `COSINE a b` · `SIMILARITY a b` | double |
+Every distance here is computed by the one shared double-precision implementation, so the values agree to the last bit with the other SQL-visible distances and with every other FractalSQL host -- see the precision contract in [api-discovery.md](api-discovery.md).
+
 | `FRACTAL.VECTOR.LP a b p` | the L_p distance (`p > 0`; for `0 < p < 1` it is not a proper metric, so use it deliberately) |
 | `FRACTAL.VECTOR.NORM a` | double |
 | `FRACTAL.VECTOR.NORMALIZE a` · `ADD a b` · `SUB a b` · `SCALE a s` | blob |

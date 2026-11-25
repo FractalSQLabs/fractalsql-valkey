@@ -4,7 +4,7 @@
 
 # fractalsql-valkey-mcp
 
-A Model Context Protocol server for FractalSQL on Valkey: 69 typed tools over the module's commands, stdio or HTTP/TLS. A standalone C++17 client of Valkey (it speaks RESP itself; no client library, no link to the module).
+A Model Context Protocol server for FractalSQL on Valkey: 93 typed tools over the module's commands, stdio or HTTP/TLS. A standalone C++17 client of Valkey (it speaks RESP itself; no client library, no link to the module).
 
     make -C mcp                                  # needs a C++17 compiler and OpenSSL headers
     VALKEY_PORT=6379 mcp/fractalsql-valkey-mcp --list-tools

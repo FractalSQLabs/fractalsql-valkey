@@ -189,7 +189,20 @@ components. Mirrors core's own THIRD-PARTY-NOTICES-COMMUNITY.md.
 
 -------------------------------------------------------------------------------
 
-### 5. Companion software (used, not distributed)
+### 5. Compiler runtime libraries (MCP server)
+The MCP server (`fractalsql-valkey-mcp`) is a C++17 binary whose shipped form
+links the GNU C++ standard library (`libstdc++`) statically: the binary is
+built once per architecture and runs on every supported distro, and libstdc++
+compatibility is what varies most between them (libgcc_s stays dynamic: a static
+libgcc pulls in _dl_find_object and raises the glibc floor). libstdc++ is
+GPL-3.0-or-later WITH the GCC Runtime Library Exception (version 3.1), which
+permits distributing the compiled program under terms of its own choosing. The
+Valkey module (`fractalsql*.so`) and the daemon `fractalsqld` are C and carry
+no C++ runtime.
+
+-------------------------------------------------------------------------------
+
+### 6. Companion software (used, not distributed)
 FractalSQL for Valkey does not depend on, link, load, or redistribute any of the
 following. They are named here because the documentation, the `search` Docker
 Compose profile, `bench/head_to_head.py` and build_test.sh gate 14 run FractalSQL

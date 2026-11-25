@@ -71,6 +71,7 @@ typedef struct fsql_session_entry {
      * a second exclusive acquire of that id then fails fast instead of
      * racing the core. Checked alongside refcount by every destroy path. */
     int                          busy;
+    int                          retention_applied;   /* FRACTALSQL_LEDGER_RETENTION is on this ctx */
     /* How many PLAIN (non-exclusive) holders this entry has right now:
      * the diversify tuning/diagnostic calls and the ledger calls, all
      * of which run against the same ctx an exclusive holder would.
@@ -295,6 +296,7 @@ fractal_session_acquire(unsigned long long session_id)
     }
 
     fsql_ctx *ctx = e->ctx;
+    if (!e->retention_applied && fractal_enterprise_apply_retention(ctx)) e->retention_applied = 1;
     e->shared++;   /* a plain holder: an exclusive acquire must refuse */
     session_unlock();
     return ctx;

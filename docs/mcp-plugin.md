@@ -4,7 +4,7 @@
 
 # MCP Plugin
 
-`fractalsql-valkey-mcp` is a Model Context Protocol (MCP) server that gives an AI assistant the FractalSQL commands as **69 typed tools**.
+`fractalsql-valkey-mcp` is a Model Context Protocol (MCP) server that gives an AI assistant the FractalSQL commands as **93 typed tools**.
 It is a small standalone C++17 program. It is an ordinary client of a Valkey that has the FractalSQL module loaded: it speaks RESP itself,
 links no Valkey client library and none of the module, and holds no state of its own. Whatever the assistant is allowed to do is decided by the
 Valkey ACL of the user the server connects as.
@@ -324,6 +324,10 @@ whose administrator cannot rewrite it. It is off by default and publishes nothin
 that expires after 120 seconds, searched, and deleted; it is never left behind. Optional arguments you skip are left off, and an optional argument that sits before one you did give is
 filled with the command's documented default.
 
+`fractal_search` also takes `index` (the name of an IVF index of the corpus), `nprobe` (how many of its cells to probe) and `ids` (restrict the search to a list of corpus positions). The distances it returns are still exact: the index only
+chooses which rows to look at, and every candidate is scored against the corpus. `fractal_index_create`, `fractal_index_rebuild`, `fractal_index_refresh`, `fractal_index_ensure`, `fractal_index_candidates`, `fractal_index_drop`, `fractal_index_info` and `fractal_index_list` manage
+the indexes; see [api-discovery.md](api-discovery.md) for the key layout and the staleness rule.
+
 Results are always a JSON object (`structuredContent`): a command's JSON reply is returned as is, a number or string as `{"value": ...}`, a vector as `{"vector": [...], "dim": n}`,
 raw bytes as `{"hex": ..., "bytes": n}`, a list as `{"items": [...]}`.
 
@@ -369,6 +373,14 @@ session but are not annotated destructive; the `Flags` column says which is whic
 | `fractal_isolate_background` | Mark one result as background noise for a session so it is excluded from future repulsion. | **destructive** |
 | `fractal_session_close` | Drop a diversify session and free its memory. | **destructive** |
 | `fractal_session_list` | List the live diversify sessions. | read-only |
+| `fractal_index_create` | Build the native IVF index of a corpus key (a k-means partition with INT8, INT4, FP16 or FP32 codes). | **destructive** |
+| `fractal_index_rebuild` | Rebuild an index from the current corpus; a new generation is written and the pointer flipped. | **destructive** |
+| `fractal_index_drop` | Drop an index: the cells, the metadata and the generation pointer are removed. | **destructive** |
+| `fractal_index_refresh` | Fold the rows appended since the build into the cells without retraining; a new generation is written. | **destructive** |
+| `fractal_index_ensure` | Create, refresh, rebuild or leave an index, whichever it needs, and say which; the reply names the action, status, generation and rows. | **destructive** |
+| `fractal_index_info` | Describe an index: its status (ready, stale, degraded, empty or orphaned), the advice for what to do next, its format and sizes, the rows added since the build, and the statistics of its last search. | read-only |
+| `fractal_index_candidates` | The corpus positions a Scout pass should look at (the nearest cells of an index, plus rows added after the build); a shortlist, not an answer. | read-only |
+| `fractal_index_list` | List the indexes of a corpus key with their format, rows, status and generation. | read-only |
 
 ### Cognition (needs the fractalsqld daemon)
 
@@ -410,6 +422,7 @@ session but are not annotated destructive; the `Flags` column says which is whic
 | `fractal_dimension_dfa` | Detrended fluctuation analysis exponent of a series: about 0.5 for noise, above 1 for persistent trends. | read-only |
 | `fractal_dimension_drift` | Regime drift: the DFA exponent of the recent window against the baseline before it. | read-only |
 | `fractal_dimension_boxcount` | Box-counting fractal dimension of a point cloud. | read-only |
+| `fractal_chunk_text` | Split text into chunks of at most chunk_size characters: `[{no, start, end, text}]`. Pure, no model. | read-only |
 | `fractal_periodogram` | Dominant frequencies of a series: the strongest spectral peaks. | read-only |
 | `fractal_change_point_detect` | Indices where the series' behaviour changes. | read-only |
 | `fractal_state_fingerprint` | A compact bit fingerprint of a vector (random-hyperplane hash); returns hex bytes. | read-only |
@@ -421,6 +434,17 @@ session but are not annotated destructive; the `Flags` column says which is whic
 | `fractal_nerve_plexus_metric` | Fibre-length density and branch density of a nerve skeleton. | read-only |
 | `fractal_vascular_network` | Tortuosity, branch density and fractal dimension of a vessel tree. | read-only |
 | `fractal_optimize_portfolio` | Cardinality-constrained Sharpe maximisation by Stochastic Fractal Search. | read-only |
+| `fractal_vector_add` | The element-wise sum of two vectors. | read-only |
+| `fractal_vector_cosine_distance` | The cosine distance between two vectors: 0 when they point the same way, 1 when they are orthogonal. | read-only |
+| `fractal_vector_cosine_similarity` | The cosine similarity between two vectors: 1 when they point the same way, 0 when they are orthogonal. | read-only |
+| `fractal_vector_from_text` | Parses a vector from text -- a JSON array, or a comma-separated list of numbers -- into the canonical vector. | read-only |
+| `fractal_vector_l2_distance` | The L2 (Euclidean) distance between two vectors. | read-only |
+| `fractal_vector_l2_squared` | The squared L2 distance: the same measure without the square root. | read-only |
+| `fractal_vector_norm` | The vector's L2 norm (its magnitude). | read-only |
+| `fractal_vector_normalize` | The vector scaled to unit length. | read-only |
+| `fractal_vector_scale` | The vector multiplied by a scalar factor. | read-only |
+| `fractal_vector_sub` | The element-wise difference of two vectors. | read-only |
+| `fractal_vector_to_json` | Renders a vector as JSON: the array of numbers. | read-only |
 | `fractal_vector_lp_distance` | Minkowski L_p distance. | read-only |
 | `fractal_vector_hamming_distance` | Differing bits between two equal-length binary strings (hex). | read-only |
 | `fractal_vector_quantize_int8` | Scalar int8 quantisation: returns scale and codes (4x smaller). | read-only |

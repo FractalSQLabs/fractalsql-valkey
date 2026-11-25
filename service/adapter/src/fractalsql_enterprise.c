@@ -150,7 +150,7 @@
 #include <openssl/crypto.h>      /* CRYPTO_memcmp: constant-time ledger MAC comparison */
 
 /* The covariance matrix is n*n doubles: the asset count is bounded (8192 is 512 MiB of matrix) so that n*n and n*n*8 cannot wrap a
- * size_t, whatever the input's length limits happen to be (SECURITY_AUDIT.md 3.15). */
+ * size_t, whatever the input's length limits happen to be. */
 #define FSQ_MAX_ASSETS ((size_t) 8192)
 static inline int fsq_cov_cells_ok(size_t n_assets, size_t cov_n) { return n_assets <= FSQ_MAX_ASSETS && cov_n == n_assets * n_assets; }
 
@@ -275,6 +275,8 @@ ent_env_capture_locked(void)
 }
 
 static ent_ledger_void_fn   g_ent_ledger_flush;
+typedef int (*ent_set_mode_fn)(fsql_ctx *ctx, int mode);
+static ent_set_mode_fn      g_ent_ledger_set_retention;   /* optional: absent in cores older than 2.0.28 */
 static ent_ledger_void_fn   g_ent_ledger_load;
 static ent_ledger_void_fn   g_ent_ledger_compact;
 static ent_ledger_void_fn   g_ent_ledger_reset_soft;
@@ -636,6 +638,8 @@ ent_resolve_symbols(void *h)
         ent_dlsym(h, "fsql_optimize_portfolio_multimodal_ex");
     g_ent_portfolio_multimodal_pareto = (ent_portfolio_multimodal_pareto_fn)
         ent_dlsym(h, "fsql_optimize_portfolio_multimodal_pareto");
+
+    g_ent_ledger_set_retention = (ent_set_mode_fn) ent_dlsym(h, "fsql_ledger_set_retention");
 
     return g_ent_ledger_flush && g_ent_ledger_load && g_ent_ledger_compact &&
            g_ent_ledger_reset_soft && g_ent_ledger_reset_hard &&
@@ -1908,6 +1912,26 @@ ledger_write_entry(fsql_storage_user_ctx user, int kind,
         long sz = -1L;
         if (fseek(fp, 0, SEEK_END) == 0) sz = ftell(fp);
         if (sz == 0) is_new = true;
+        /* The ledger is append-only (a hash chain cannot lose a row
+         * without breaking), so it is bounded by size instead.
+         * FRACTALSQL_LEDGER_MAX_BYTES (default 1 GiB; 0 = unbounded) is the size
+         * past which appends are refused; the operator archives the file and
+         * starts a new chain. */
+        {
+            const char *mx = getenv("FRACTALSQL_LEDGER_MAX_BYTES");
+            long long cap = 1073741824LL;
+            if (mx != NULL && mx[0] != '\0')
+            {
+                char *endp = NULL;
+                long long v = strtoll(mx, &endp, 10);
+                if (endp != NULL && *endp == '\0' && v >= 0) cap = v;
+            }
+            if (cap > 0 && sz >= 0 && (long long) sz >= cap)
+            {
+                fclose(fp); ledger_log_exit("ledger full (FRACTALSQL_LEDGER_MAX_BYTES)");
+                ent_unlock(); return FSQL_ESTORAGE;
+            }
+        }
         /* Seek back to the start: the header check below reads the
          * magic at the CURRENT position, and fopen left it at 0.
          * Measuring the size moved it to the end, where the magic
@@ -2200,6 +2224,35 @@ fractal_ledger_storage_vfs(void)
     return &g_ledger_vfs;
 }
 
+/* ledger_retention: FRACTALSQL_LEDGER_RETENTION = "fade" (the core's default, no call needed) or "exact" (the Shadow
+ * weights never decay). Applied to a session's context once, when the enterprise library is loaded. Returns true when
+ * the library is loaded and the context now carries the configured mode (or needs none); false when there is
+ * nothing to apply yet, so the caller tries again on the next acquire. An "exact" request against a library that
+ * does not export fsql_ledger_set_retention is refused loudly (stderr), never silently run as "fade". */
+bool
+fractal_enterprise_apply_retention(fsql_ctx *ctx)
+{
+    const char *e = getenv("FRACTALSQL_LEDGER_RETENTION");
+    bool exact = e != NULL && strcmp(e, "exact") == 0;
+    bool loaded, done = false;
+
+    if (ctx == NULL) return false;
+    if (e != NULL && *e != '\0' && !exact && strcmp(e, "fade") != 0) {
+        fprintf(stderr, "fractalsql: FRACTALSQL_LEDGER_RETENTION=\"%s\" is not recognised (fade or exact); using fade\n", e);
+    }
+    ent_lock();
+    loaded = g_ent_loaded;
+    if (loaded) {
+        if (!exact) done = true;
+        else if (g_ent_ledger_set_retention == NULL)
+            fprintf(stderr, "fractalsql: FRACTALSQL_LEDGER_RETENTION=exact needs an enterprise library that exports "
+                            "fsql_ledger_set_retention (upgrade the enterprise library); the ledger stays at fade\n");
+        else done = g_ent_ledger_set_retention(ctx, 1) == FSQL_OK;
+    }
+    ent_unlock();
+    return done;
+}
+
 bool
 fractal_enterprise_lib_loaded(void)
 {
@@ -2362,7 +2415,7 @@ ledger_verify_latest_file(uint32_t kind)
 /* ------------------------------------------------------------------ */
 /* The destructive ledger operations (compact, reset_soft, reset_hard) refuse unless the operator has set
  * FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1 in the environment of the process that hosts the ledger: a server nobody configured cannot
- * have its audit chain destroyed by a command from any account that may call the function (SECURITY_AUDIT.md 3.12). flush is routine
+ * have its audit chain destroyed by a command from any account that may call the function. flush is routine
  * and is not gated. The one-way latch (fractal_lock_destructive) still wins. */
 static bool ent_destructive_allowed(void)
 {
@@ -2476,6 +2529,11 @@ fractal_ledger_load(UDF_INIT *initid, UDF_ARGS *args, char *is_null, char *error
 {
     (void) initid;
     if (args->args[0] == NULL) { *is_null = 1; return 0; }
+    /* Overwrites the live in-memory ledger state, so it honours the same
+     * destructive latch as flush/compact/reset (a latched session must not
+     * be able to roll the ledger back). */
+    if (fractal_session_destructive_locked(
+            (unsigned long long) *(long long *) args->args[0])) { *error = 1; return 0; }
     if (!ensure_enterprise_lib()) { *error = 1; return 0; }
 
     if (ledger_verify_latest_file(1) != FSQL_OK) { *error = 1; return 0; }

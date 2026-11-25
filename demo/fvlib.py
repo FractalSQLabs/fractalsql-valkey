@@ -64,6 +64,15 @@ class Conn:
 
 
 def pack(v):
+    """The packed float32 blob of a vector, or of a list of rows.
+
+    A corpus is a list of rows (each row a list of floats), so a caller
+    hands over pack([[...], [...]]); the rows are flattened here, the
+    same shape flat() gives, so a flat vector and a list of rows are both
+    accepted and neither can be packed by mistake.
+    """
+    if v and isinstance(v[0], (list, tuple)):
+        v = flat(v)
     return struct.pack("<%df" % len(v), *v)
 
 

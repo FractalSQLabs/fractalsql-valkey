@@ -29,6 +29,40 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Comma-joined %.9g text of n doubles (9 digits round-trip a float32), malloc'd; NULL on failure. */
+static inline char *
+fv_csv_of(const double *v, size_t n)
+{
+    /* %.9g of a double is at most 16 characters ("-1.23456789e-308") plus the comma: 24 per element
+     * covers it with room to spare, and every write is bounded by what is left of the buffer. */
+    if (n > (SIZE_MAX - 8) / 24) return NULL;
+    size_t cap = n * 24 + 8;
+    char *s = (char *) malloc(cap), *o;
+    if (s == NULL) return NULL;
+    o = s;
+    for (size_t i = 0; i < n; i++) {
+        size_t left = cap - (size_t) (o - s);
+        int    k    = snprintf(o, left, "%s%.9g", i ? "," : "", v[i]);   /* 9 digits round-trip a float32 */
+        if (k < 0 || (size_t) k >= left) { free(s); return NULL; }
+        o += k;
+    }
+    *o = '\0';
+    return s;
+}
+
+/* Bounded substring search. memmem() is a GNU extension: without _GNU_SOURCE it is implicitly declared (its pointer
+ * result truncated to int) and it does not exist on MinGW, and both call sites are checks that reject input. */
+static inline int
+fv_contains(const void *hay, size_t hlen, const char *needle, size_t nlen)
+{
+    const unsigned char *h = (const unsigned char *) hay;
+    if (nlen == 0) return 1;
+    if (nlen > hlen) return 0;
+    for (size_t i = 0; i + nlen <= hlen; i++)
+        if (memcmp(h + i, needle, nlen) == 0) return 1;
+    return 0;
+}
+
 #ifndef FRACTALSQL_VERSION
 #  error "FRACTALSQL_VERSION must come from the build (the Makefile reads ./VERSION)"
 #endif
@@ -92,6 +126,7 @@ struct fv_job {
     RedisModuleBlockedClient *bc;
     void  (*work)(fv_job *);      /* runs on a worker (or inline) */
     void  (*dispose)(fv_job *);   /* frees the job and everything it owns */
+    int   (*reply)(RedisModuleCtx *ctx, fv_job *job);  /* optional: builds the reply on the main thread */
     size_t bytes;                 /* counted against the in-flight cap */
     const char *audit;            /* an agent job: the audit-ledger entry type for its decision document, or NULL */
     int    done;                  /* worker -> main handoff flag (release/acquire) */
@@ -152,6 +187,45 @@ int fv_register_analytics(RedisModuleCtx *ctx);
 int fv_register_daemon(RedisModuleCtx *ctx);
 int fv_register_agents(RedisModuleCtx *ctx);
 int fv_register_session(RedisModuleCtx *ctx);
+int fv_register_index(RedisModuleCtx *ctx);
+int fv_register_feature(RedisModuleCtx *ctx);
+
+/* ---------------------------------------------------------------- */
+/* the native IVF index (src/fv_index.c)                            */
+/* ---------------------------------------------------------------- */
+
+/* A resident index: the model, the cells and the metadata of one generation. */
+typedef struct fv_index fv_index;
+
+typedef struct {
+    char     name[64];
+    uint32_t dim, nlist, pca_dim, code_bytes;
+    int      fmt, generation;
+    uint32_t nprobe_default;
+    size_t   rerank_default;
+    uint64_t rows;           /* the rows the index was built over (corpus positions 0 .. rows-1) */
+} fv_index_info_t;
+
+/* Non-zero when the vendored core carries the IVF maths. When it does not, every index command answers with
+ * fv_index_missing_message() (the SQL surface is the same on every platform). */
+int         fv_index_available(void);
+const char *fv_index_missing_message(void);
+
+/* Loads (or returns the resident) index of (corpus_key, name). NULL and a message on failure. */
+fv_index *fv_index_load(RedisModuleCtx *ctx, const char *corpus_key, const char *name, char *err, size_t errsz);
+void      fv_index_release(fv_index *x);
+int       fv_index_get_info(const fv_index *x, fv_index_info_t *out);
+/* The first index (by name) of a corpus key: 1 with the name in `name`, 0 when there is none. Main thread only. */
+int       fv_index_first_name(RedisModuleCtx *ctx, const char *corpus, char *name, size_t namesz);
+
+/* The candidate corpus positions for a query (worker side). The distances are the core's approximate ones: the caller
+ * verifies every candidate against the corpus before it becomes an answer. */
+int fv_index_search(fv_index *x, const float *query, uint32_t nprobe, size_t shortlist,
+                    int64_t *ids, double *dists, size_t *n_out, uint64_t *rows_scanned, uint32_t *cells_probed,
+                    char *err, size_t errsz);
+
+/* Records the statistics of the last search of an index (FRACTAL.INDEX.INFO reports them). */
+void fv_index_note_search(const char *corpus_key, const char *name, int used, uint64_t scanned, uint32_t probed);
 
 /* One reasoning call from a worker thread (the agents' step 3). Returns 0 with
  * a malloc'd string in *out, or -1 with a message in err (including "no daemon
@@ -184,7 +258,8 @@ int fv_daemon_embed(const char *text, double **vec, size_t *n, char *err, size_t
 /* Load-time setting for search_agent / rag_agent: when set, a reasoning failure
  * after a successful retrieval returns the retrieval plus "reasoning_step_failed"
  * instead of an error. Off by default. */
-void fv_agents_configure(int partial_reasoning_fail);
+/* agent_use_index: 0 no, 1 yes, 2 auto (an index only when it is ready -- nothing appended since the build -- and the key has at least min_rows rows) */
+void fv_agents_configure(int partial_reasoning_fail, int agent_use_index, int index_min_rows);
 
 /* Reads a series from the string key `keyname` (packed little-endian float32)
  * into a malloc'd double array. Main thread only: it opens the key. */

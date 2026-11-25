@@ -93,6 +93,31 @@ VKQ_HOSTILE = {
     "FRACTALSQL_BT_VKQ_BADSYNTAX": "```\n@@@((\n```",                        # valkey-search refuses it, every time
     "FRACTALSQL_BT_VKQ_PROSE": "I cannot write that query.",                   # no block at all
 }
+# FRACTAL.AGENT.DATA_ANALYST in scan mode (no valkey-search) asks for ONE JSON filter; its generation prompt always contains this phrase.
+VKS_PHRASE = "valkey scan filter"
+VKS_GOOD = "```\n{\"field\":\"age\",\"op\":\">\",\"value\":30}\n```"
+VKS_REPLIES = {
+    # filters that are valid: the test checks the rows each one selects
+    "FRACTALSQL_BT_VKS_ANY": "```\n{\"any\":[{\"field\":\"name\",\"op\":\"=\",\"value\":\"ann\"},{\"field\":\"age\",\"op\":\">=\",\"value\":50}]}\n```",
+    "FRACTALSQL_BT_VKS_ALL": "```\n{\"all\":[{\"field\":\"age\",\"op\":\">=\",\"value\":30},{\"field\":\"age\",\"op\":\"<=\",\"value\":50}]}\n```",
+    "FRACTALSQL_BT_VKS_IN": "```\n{\"field\":\"city\",\"op\":\"in\",\"value\":[\"paris\",\"berlin\"]}\n```",
+    "FRACTALSQL_BT_VKS_PREFIX": "```\n{\"field\":\"name\",\"op\":\"prefix\",\"value\":\"b\"}\n```",
+    "FRACTALSQL_BT_VKS_CONTAINS": "```\n{\"field\":\"city\",\"op\":\"contains\",\"value\":\"on\"}\n```",
+    "FRACTALSQL_BT_VKS_NUMEQ": "```\n{\"field\":\"age\",\"op\":\"=\",\"value\":47}\n```",
+    "FRACTALSQL_BT_VKS_NE": "```\n{\"field\":\"name\",\"op\":\"!=\",\"value\":\"ann\"}\n```",
+    "FRACTALSQL_BT_VKS_BINARY": "```\n{\"field\":\"v\",\"op\":\"=\",\"value\":\"x\"}\n```",
+    # filters that must be refused, never turned into anything else
+    "FRACTALSQL_BT_VKS_BADJSON": "```\n{\"field\":\"age\",\n```",
+    "FRACTALSQL_BT_VKS_UNKNOWNOP": "```\n{\"field\":\"age\",\"op\":\"~\",\"value\":1}\n```",
+    "FRACTALSQL_BT_VKS_UNKNOWNFIELD": "```\n{\"field\":\"nosuch\",\"op\":\"=\",\"value\":1}\n```",
+    "FRACTALSQL_BT_VKS_UNKNOWNKEY": "```\n{\"field\":\"age\",\"op\":\">\",\"value\":1,\"cmd\":\"FLUSHALL\"}\n```",
+    "FRACTALSQL_BT_VKS_NUMOP": "```\n{\"field\":\"name\",\"op\":\">\",\"value\":\"a\"}\n```",
+    "FRACTALSQL_BT_VKS_DEEP": "```\n" + "{\"all\":[" * 6 + "{\"field\":\"age\",\"op\":\">\",\"value\":1}" + "]}" * 6 + "\n```",
+    "FRACTALSQL_BT_VKS_LONG": "```\n{\"field\":\"name\",\"op\":\"=\",\"value\":\"" + "a" * 2200 + "\"}\n```",
+    "FRACTALSQL_BT_VKS_STACK": "```\n{\"field\":\"name\",\"op\":\"=\",\"value\":\"x\"}; FLUSHALL\n```",
+    "FRACTALSQL_BT_VKS_PROSE": "I cannot write that filter.",
+}
+VKS_RETRY_MARKER = "FRACTALSQL_BT_VKS_RETRY"                                    # bad first, good once the prompt reports a failure
 VKQ_RETRY_MARKER = "FRACTALSQL_BT_VKQ_RETRY"                                    # bad first, good once the prompt reports a failure
 
 
@@ -114,7 +139,14 @@ class Handler(BaseHTTPRequestHandler):
                 {"data": [{"embedding": EMBED_VECTOR}]}
             ).encode("utf-8")
         else:
-            if VKQ_PHRASE in body_text:
+            if VKS_PHRASE in body_text:
+                reply = VKS_GOOD
+                for marker, text in VKS_REPLIES.items():
+                    if marker in body_text:
+                        reply = text
+                if VKS_RETRY_MARKER in body_text:
+                    reply = VKS_GOOD if "previous attempt failed" in body_text else VKS_REPLIES["FRACTALSQL_BT_VKS_BADJSON"]
+            elif VKQ_PHRASE in body_text:
                 reply = VKQ_GOOD
                 for marker, hostile in VKQ_HOSTILE.items():
                     if marker in body_text:

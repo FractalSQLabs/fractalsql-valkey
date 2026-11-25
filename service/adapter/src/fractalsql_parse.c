@@ -7,16 +7,16 @@
  * they can be linked and fuzzed standalone (no a database client header, no UDF_INIT/
  * UDF_ARGS, no host server needed) -- see the tests/fuzz/ drivers.
  *
- * parse_vector_csv is the highest-value fuzz target here: it runs on
- * fractal_embed()'s raw, unvalidated HTTP response body (whatever text
- * the configured embeddings endpoint returned), the one genuinely
- * externally-adversarial input in this codebase, before any allowlist or
- * schema check has a chance to run. parse_corpus and parse_index_csv
- * only ever see SQL-caller-supplied text (fractal_search's corpus
- * argument, the Analytics-tier edge/face index arguments) -- a
- * different, lower-privilege threat model, but built in the same style
- * and on top of the same buffer-growth logic, so fuzzed too as
- * defense-in-depth.
+ * parse_embedding_array is the highest-value fuzz target here: it runs
+ * on fractal_embed()'s raw, unvalidated HTTP response body (whatever
+ * text the configured embeddings endpoint returned), the one genuinely
+ * externally-adversarial input in this codebase, before any allowlist
+ * or schema check has a chance to run. parse_vector_csv, parse_corpus
+ * and parse_index_csv only ever see SQL-caller-supplied text
+ * (fractal_search's corpus argument, the Analytics-tier edge/face
+ * index arguments) -- a different, lower-privilege threat model, but
+ * built in the same style and on top of the same buffer-growth logic,
+ * so fuzzed too as defense-in-depth.
  */
 
 #include <errno.h>
@@ -195,6 +195,99 @@ parse_vector_csv(const char *src, size_t srclen,
 
     if (n == 0) {
         SFS_INIT_ERROR(errmsg, "fractalsql: vector must have at least one element");
+        free(v); return false;
+    }
+    *out = v;
+    *n_out = n;
+    return true;
+}
+
+/* The embedding reply: a JSON array of numbers -- '[' then the numbers
+ * then ']'. Anything after the closing bracket is ignored (a provider
+ * that appends a note to the array still answers), and a reply that
+ * holds no array at all is refused. This is the shape the other hosts
+ * parse the same reply in (fsql_parse_embedding_array in the SQLite,
+ * PostgreSQL and DuckDB columns), so the daemon answers the way they
+ * do: a bracketed array with trailing text is a vector, a bare
+ * "1,2,3" is not. A non-finite element is refused (it would flow
+ * through the vector math and out the other side as "inf"/"nan").
+ * The reply is the model provider's own output, so it is the one
+ * externally-adversarial input on this path; the growth buffer is
+ * bounded and every element is checked. */
+bool
+parse_embedding_array(const char *src, size_t srclen,
+                      double **out, size_t *n_out, char *errmsg)
+{
+    char   *buf, *p;
+    size_t  cap = 16, n = 0;
+    double *v;
+
+    if (src == NULL || srclen == 0) {
+        SFS_INIT_ERROR(errmsg, "fractalsql: the embedding reply is empty");
+        return false;
+    }
+    buf = malloc(srclen + 1);
+    if (buf == NULL) {
+        SFS_INIT_ERROR(errmsg, "fractalsql: oom parsing the embedding reply");
+        return false;
+    }
+    memcpy(buf, src, srclen);
+    buf[srclen] = '\0';
+
+    p = strchr(buf, '[');
+    if (p == NULL) {
+        SFS_INIT_ERROR(errmsg, "fractalsql: the embedding reply holds no array");
+        free(buf); return false;
+    }
+    p++;
+
+    v = malloc(cap * sizeof(double));
+    if (v == NULL) { free(buf); SFS_INIT_ERROR(errmsg, "fractalsql: oom"); return false; }
+
+    for (;;) {
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == '\n' || *p == '\r') p++;
+        if (*p == ']' || *p == '\0') break;
+
+        errno = 0;
+        char *end = NULL;
+        double d = strtod(p, &end);
+        if (end == p) {
+            SFS_INIT_ERROR(errmsg, "fractalsql: invalid number near '%.20s' in the embedding reply", p);
+            free(buf); free(v); return false;
+        }
+        if (errno == ERANGE) {
+            SFS_INIT_ERROR(errmsg, "fractalsql: value out of range in the embedding reply");
+            free(buf); free(v); return false;
+        }
+        if (!isfinite(d)) {
+            SFS_INIT_ERROR(errmsg, "fractalsql: non-finite element in the embedding reply");
+            free(buf); free(v); return false;
+        }
+        if (n == PARSE_MAX_ELEMS) {
+            SFS_INIT_ERROR(errmsg, "fractalsql: the embedding reply exceeds %u elements",
+                           (unsigned) PARSE_MAX_ELEMS);
+            free(buf); free(v); return false;
+        }
+        if (n == cap) {
+            size_t ncap = cap * 2;
+            if (ncap < cap || !mul_ok(ncap, sizeof(double), 1)) {
+                SFS_INIT_ERROR(errmsg, "fractalsql: the embedding reply is too large");
+                free(buf); free(v); return false;
+            }
+            double *nv = realloc(v, ncap * sizeof(double));
+            if (nv == NULL) {
+                SFS_INIT_ERROR(errmsg, "fractalsql: oom growing the embedding reply");
+                free(buf); free(v); return false;
+            }
+            v = nv; cap = ncap;
+        }
+        v[n++] = d;
+        p = end;
+    }
+    free(buf);
+
+    if (n == 0) {
+        SFS_INIT_ERROR(errmsg, "fractalsql: the embedding reply's array is empty");
         free(v); return false;
     }
     *out = v;

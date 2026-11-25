@@ -68,6 +68,8 @@
 #                  allow (139 runs), and a connection killed under it
 #   26  mcp_db_probe       the RESP client (parser, reconnect, error classification) against a live server
 #   27  mcp_concurrency_probe  the per-class concurrency caps on their own
+#   37  audit_regress  VK-01/VK-02 over src/fv_common.h: the multimodal CSV renderer stays within its
+#                      buffer (ASan), the "_actor" / "=>" rejections use a bounded substring search, not memmem  ~3s
 #   28  mcp_faults  FAULT ONLY (--fault, not in DEFAULT/QUICK) (Linux) the MCP server under an
 #                  allocation/file/socket fault shim: one call failed at a
 #                  time, the server must keep answering
@@ -140,9 +142,26 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resource fence. Run the whole harness inside a transient cgroup scope so no gate (a sanitizer build, the 9-database `multi`
+# lifecycle mode, an OOM sweep) can take the host down: memory is capped (swap off, so it OOM-kills inside the fence instead of
+# thrashing the guest), CPU leaves one core free, and the group sits at low CPU weight. Needs Linux + systemd --user; anywhere
+# else, or with FSQL_NO_CGROUP=1, it is skipped. Tune with FSQL_MEM_MAX (e.g. 3G; default 55% of RAM) and FSQL_CPU_QUOTA
+# (percent of one CPU; default (CPUs-1)*100).
+if [ -z "${FSQL_FENCED:-}" ] && [ "${FSQL_NO_CGROUP:-0}" != 1 ] && [ "$(uname -s)" = Linux ] \
+   && command -v systemd-run >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+  _ncpu="$(nproc 2>/dev/null || echo 1)"
+  _memkb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo)"
+  _mem="${FSQL_MEM_MAX:-$(( _memkb * 55 / 100 / 1024 ))M}"
+  _cpu="${FSQL_CPU_QUOTA:-$(( (_ncpu > 1 ? _ncpu - 1 : 1) * 100 ))%}"
+  case "$_cpu" in *%) ;; *) _cpu="$_cpu%" ;; esac
+  export FSQL_FENCED=1
+  exec systemd-run --user --scope --quiet -p MemoryMax="$_mem" -p MemorySwapMax=0 -p CPUQuota="$_cpu" -p CPUWeight=20 \
+    -p TasksMax=4096 -- "$0" "$@"
+fi
 cd "$HERE"
 
-ALL_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 30 31 32 33 34 35 36)
+ALL_GATES=(01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18 19 20 22 23 24 25 26 27 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46)
 MCP_GATES=(22 23 24 25 26 27 30 31)   # --gate mcp
 FUZZ_GATES=(21 29)                    # --fuzz
 QUICK_GATES=(01 02)
@@ -297,7 +316,9 @@ cleanup() {
     for _ in $(seq 1 50); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
     kill -9 "$p" 2>/dev/null
   done
-  rm -rf "$TMPROOT"
+  # FSQL_KEEP_TMP=1 keeps the run's scratch directory (the daemon's and the
+  # server's logs) for a failing run to be looked at.
+  if [ -z "${FSQL_KEEP_TMP:-}" ]; then rm -rf "$TMPROOT"; fi
   [ -n "$SHORT_TMP" ] && rm -rf "$SHORT_TMP"
 }
 trap cleanup EXIT
@@ -638,6 +659,11 @@ expect_load_refused() {
 }
 
 gate_09_limits() {
+  # the settings table in the reasoning-setup guide names every configuration key this build defines
+  if command -v python3 >/dev/null 2>&1; then
+    local dcout; dcout="$(python3 -I "$HERE/tests/check_config_docs.py" "$HERE" 2>&1)" \
+      && pass "09 limits: ${dcout#check_config_docs: }" || fail "09 limits: ${dcout#check_config_docs: }"
+  else skip "09 limits: the settings-table check needs python3"; fi
   spawn_server limits threads 2 max-inflight-mb 1 || { fail "09 limits: could not start the limited server"; return; }
   run_py_gate 09 limits "$SP_PORT" "$SP_PID" "$SP_LOG"
   expect_load_refused "zero threads" threads 0
@@ -833,7 +859,16 @@ start_daemon() {
   local name="$1" fsqld plat plug
   fsqld="$(find_daemon)" || return 1
   plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-  plug="$(cd "$HERE/include/$plat" && pwd -P)/fractalsql-reasoning-http.so"
+  # The daemon's HTTP URLs point at the mock LLM. Gate 15 starts it, but a
+  # gate that starts a daemon on its own (the scripted-reply gates, run with
+  # --gate 42 and friends) must not depend on another gate having run first:
+  # the mock LLM is started here when it is not up yet.
+  if [ -z "${MOCK_PORT:-}" ]; then
+    start_mock_llm || { echo "the mock LLM did not start" >&2; return 1; }
+  fi
+  # D_PLUGIN overrides the vendored reasoning plugin (the scripted-reply gates run the daemon with
+  # the scripted plugin instead).
+  plug="${D_PLUGIN:-$(cd "$HERE/include/$plat" && pwd -P)/fractalsql-reasoning-http.so}"
   D_DIR="$TMPROOT/daemon_$name"; mkdir -p "$D_DIR"
   D_SOCK="$D_DIR/fsqld.sock"; D_KEY="$D_DIR/key"
   [ -s "$D_KEY" ] || "$PY" -c 'import secrets; print(secrets.token_hex(32))' > "$D_KEY"
@@ -848,6 +883,7 @@ start_daemon() {
   rm -f "$D_SOCK"
   ( cd "$D_DIR" && \
     { if [ -n "${D_RESPONSE_MODE:-}" ]; then export FSQL_REASONING_HTTP_RESPONSE_MODE="$D_RESPONSE_MODE"; fi; } && \
+    FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE=1 \
     FSQL_REASONING_REQUIRE_SIGNATURE=0 \
     FRACTALSQL_REASONING_PLUGIN="$plug" \
     FRACTALSQL_HTTP_URL="http://127.0.0.1:$MOCK_PORT/v1/chat/completions" \
@@ -870,7 +906,7 @@ gate_15_daemon() {
   FSQL_PHASE=unconfigured run_py_gate 15 daemon
   start_mock_llm || { fail "15 daemon: the mock LLM did not start"; return; }
   start_daemon community || { fail "15 daemon: fractalsqld did not start"; return; }
-  spawn_server daemon daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20 \
+  spawn_server daemon daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20 agent-use-index yes \
     || { fail "15 daemon: could not start the server with the daemon configured"; return; }
   local sport="$SP_PORT" spid="$SP_PID" slog="$SP_LOG"
   FSQL_PHASE=up run_py_gate 15 daemon "$sport" "$spid" "$slog"
@@ -911,12 +947,19 @@ gate_15_daemon() {
 
 gate_16_enterprise() {
   if [ -z "$(find_daemon)" ]; then skip "16 enterprise (no fractalsqld, see gate 15)"; return; fi
-  local plat ent
+  # The real enterprise library when FSQL_ENTERPRISE_LIB (or include/) has it, otherwise the mock core (tests/mock_enterprise_core.c). The
+  # mock answers the same entry points but writes no QTL record, so the checks that need the real core run only with it.
+  local plat ent ent_kind=real
   plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
   ent="${FSQL_ENTERPRISE_LIB:-$HERE/include/$plat/libfractalsql-enterprise-sovereign-c.so}"
   if [ ! -f "$ent" ]; then
-    skip "16 enterprise (no enterprise library: set FSQL_ENTERPRISE_LIB; the library is licensed and is never vendored here)"; return
+    ent_kind=mock
+    ent="$TMPROOT/mock_enterprise_core.so"
+    if ! cc -shared -fPIC -std=c99 -I"$HERE/include/$plat" -I"$HERE/include" "$HERE/tests/mock_enterprise_core.c" -o "$ent" 2>"$TMPROOT/mock_ent_build.log"; then
+      cat "$TMPROOT/mock_ent_build.log" >&2; fail "16 enterprise: no enterprise library, and the mock core did not build"; return
+    fi
   fi
+  export FSQL_ENT_KIND="$ent_kind"
   local ledger="$TMPROOT/ledger16.dat"; rm -f "$ledger"
   start_mock_llm || { fail "16 enterprise: the mock LLM did not start"; return; }
   FRACTALSQL_ENTERPRISE_LIB="$ent" FRACTALSQL_ENTERPRISE_LEDGER_PATH="$ledger" start_daemon ent \
@@ -941,7 +984,7 @@ TAMPER
   # The audit trail's own storage: the head file next to the ledger, the
   # anchor log, the redaction of the text that goes into the chain, and the
   # permissions of the files the ledger writes.
-  run_py_driver tests/bt_ledger_atrest.py anchor-off \
+  run_py_driver tests/bt_ledger_atrest.py anchor-off anchor-off \
     --port "$sport" --ledger "$ledger" --daemon-log "$TMPROOT/daemon_ent/fsqld.log"
   # A daemon with a ledger key and the anchor log on stderr: the head
   # record's MAC, the anchor lines, and the file permissions.
@@ -952,22 +995,29 @@ TAMPER
     start_daemon ent_at || { fail "16 enterprise: fractalsqld did not start for the audit-trail storage checks"; return; }
   spawn_server ent_at daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20 \
     || { fail "16 enterprise: could not start the server for the audit-trail storage checks"; return; }
-  run_py_driver tests/bt_ledger_atrest.py atrest \
+  run_py_driver tests/bt_ledger_atrest.py atrest atrest \
     --port "$SP_PORT" --ledger "$ledger_at" --daemon-log "$TMPROOT/daemon_ent_at/fsqld.log"
+  # The ledger size cap: a daemon with FRACTALSQL_LEDGER_MAX_BYTES=400 refuses appends once the file has reached it.
+  local ledger_cap="$TMPROOT/ledger16cap.dat"; rm -f "$ledger_cap" "$ledger_cap.csv" "$ledger_cap.head"
+  FRACTALSQL_ENTERPRISE_LIB="$ent" FRACTALSQL_ENTERPRISE_LEDGER_PATH="$ledger_cap" FRACTALSQL_LEDGER_MAX_BYTES=400 \
+    start_daemon ent_cap || { fail "16 enterprise: fractalsqld did not start for the ledger cap checks"; return; }
+  spawn_server ent_cap daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20 \
+    || { fail "16 enterprise: could not start the server for the ledger cap checks"; return; }
+  FSQL_PHASE=cap run_py_gate 16 enterprise "$SP_PORT" "$SP_PID" "$SP_LOG"
   # The same chain with the audit text redacted instead of stored verbatim.
   local ledger_rh="$TMPROOT/ledger16red.dat"; rm -f "$ledger_rh" "$ledger_rh.csv" "$ledger_rh.head"
   FRACTALSQL_ENTERPRISE_LIB="$ent" FRACTALSQL_ENTERPRISE_LEDGER_PATH="$ledger_rh" FSQL_AUDIT_REDACT=hash \
     start_daemon ent_rh || { fail "16 enterprise: fractalsqld did not start for the redaction checks"; return; }
   spawn_server ent_rh daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20 \
     || { fail "16 enterprise: could not start the server for the redaction checks"; return; }
-  run_py_driver tests/bt_ledger_atrest.py redact-hash \
+  run_py_driver tests/bt_ledger_atrest.py redact-hash redact-hash \
     --port "$SP_PORT" --ledger "$ledger_rh" --daemon-log "$TMPROOT/daemon_ent_rh/fsqld.log"
   local ledger_rt="$TMPROOT/ledger16redt.dat"; rm -f "$ledger_rt" "$ledger_rt.csv" "$ledger_rt.head"
   FRACTALSQL_ENTERPRISE_LIB="$ent" FRACTALSQL_ENTERPRISE_LEDGER_PATH="$ledger_rt" FSQL_AUDIT_REDACT=truncate \
     start_daemon ent_rt || { fail "16 enterprise: fractalsqld did not start for the truncation checks"; return; }
   spawn_server ent_rt daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20 \
     || { fail "16 enterprise: could not start the server for the truncation checks"; return; }
-  run_py_driver tests/bt_ledger_atrest.py redact-truncate \
+  run_py_driver tests/bt_ledger_atrest.py redact-truncate redact-truncate \
     --port "$SP_PORT" --ledger "$ledger_rt" --daemon-log "$TMPROOT/daemon_ent_rt/fsqld.log"
   # The multimodal optimizers audit every call into the decision ledger, so they get their own daemon and ledger
   # (the checks above count records and tamper with the file).
@@ -1011,6 +1061,44 @@ gate_19_analyst() {
     run_py_gate 19 analyst "$SP_PORT" "$SP_PID" "$SP_LOG"
   else
     skip "19 analyst: the Valkey 8.1 server could not start with valkey-search on this host"
+  fi
+}
+
+# 42-46: the scripted-reply, ledger-payload, id-emission, fault-sweep and kit-mutation gates -- the counterparts of the same
+# gates in the SQLite and PostgreSQL columns. They drive the module over RESP against a fractalsqld that already has fractalsql.so
+# loaded.
+#   42 scripted_replies: the module against a model that answers EXACTLY what the test scripts (tests/vk_scripted_replies.py, with
+#                      tests/scripted_reasoning_plugin.c): the reasoning reply in every shape (a fenced block, control characters, an
+#                      empty reply), the embedding replies the parser takes or refuses, the review verdict. The daemon runs with the
+#                      scripted plugin instead of the vendored one, and the driver scripts the replies it answers from.
+#   43 ledger_payloads: what FRACTAL.AUDIT.LOG writes into the decision-audit chain for every shape of entry type and payload
+#                      (tests/vk_ledger_payloads.py, with the mock enterprise core): an object payload takes the actor inside it, a
+#                      scalar or an array is wrapped as a value, the entry type is escaped, and the chain still verifies.
+#   44 id_emission: how the agents write a row's id into their JSON result (tests/vk_id_emission.py): the id comes back byte for
+#                      byte -- quotes, backslashes, control characters, unicode, an empty id, a 400-digit id.
+#   45 oom_sweep: every kit-shaped call re-run with an allocation failure injected inside the module (tests/vk_oom_sweep.py). Valkey
+#                      exports its allocator from the executable, so an LD_PRELOAD shim never sees a module's malloc: the module's own
+#                      hook (FRACTAL.DEBUG.OOM, src/fv_oom.c, the injection flavor gate 11 builds) is used instead. The server may not
+#                      crash and may not hang.
+#   46 kit_mutation: every kit-shaped call re-run with one literal swapped for an awkward value and with its argument list changed
+#                      (tests/vk_kit_mutation.py): NULL, an empty string, a huge number, a malformed JSON fragment, an argument
+#                      dropped, an extra argument. No crash.
+# 41: DATA_ANALYST without valkey-search: the model writes a JSON filter and the module scans a key prefix as the caller. Needs a
+# fractalsqld and the mock model (no docker, no search module), so it runs the same on Linux and macOS, locally and in CI.
+gate_41_analyst_scan() {
+  if [ -z "$(find_daemon)" ]; then skip "41 analyst_scan (no fractalsqld)"; return; fi
+  start_mock_llm || { fail "41 analyst_scan: the mock LLM did not start"; return; }
+  start_daemon scan || { fail "41 analyst_scan: fractalsqld did not start"; return; }
+  if spawn_server scan daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20; then
+    run_py_gate 41 analyst_scan "$SP_PORT" "$SP_PID" "$SP_LOG"
+    # the agent demo's scan section, with a model behind it (the kit gate runs it without one, where it skips)
+    if (cd "$HERE/demo" && "$PY" demo-agents.py --port "$SP_PORT" >"$TMPROOT/demo_agents_scan.log" 2>&1); then
+      pass "41 analyst_scan: demo-agents.py runs clean with a model, including its scan section"
+    else
+      tail -8 "$TMPROOT/demo_agents_scan.log" >&2; fail "41 analyst_scan: demo-agents.py failed with a model behind it"
+    fi
+  else
+    fail "41 analyst_scan: the server did not start with the daemon configured"
   fi
 }
 
@@ -1199,7 +1287,7 @@ gate_24_mcp_https() {
   mcp_driver_gate 24 https mcp_https_smoke_client.py MCP_HTTPS_PORT="$(free_port)" MCP_HTTPS_CERT="$w/cert.pem" MCP_HTTPS_KEY="$w/key.pem"
 }
 gate_25_mcp_cli() { mcp_driver_gate 25 cli mcp_cli.py; }
-gate_36_mcp_audit_http() { mcp_driver_gate 36 audit_http mcp_audit_http.py; }   # origin check and repeated headers (SECURITY_AUDIT.md 3.17, 3.18)
+gate_36_mcp_audit_http() { mcp_driver_gate 36 audit_http mcp_audit_http.py; }   # origin check and repeated headers
 # 30 mcp_tls: the server's TLS connection to Valkey, against a TLS-terminating proxy in front of the plain server.
 gate_30_mcp_tls() {
   command -v openssl >/dev/null 2>&1 || { skip "30 mcp_tls (no openssl CLI for the throwaway certificates)"; return; }
@@ -1212,7 +1300,7 @@ gate_30_mcp_tls() {
 # gates 15 and 18's own call sequences) run under each failure; the server must answer every one. Also the module's load options for the daemon:
 # the ways a daemon-socket / daemon-key-file / daemon-timeout-s combination is refused.
 gate_35_frame_auth() {
-  # SECURITY_AUDIT.md 3.1, 3.9, 3.22 (ported from the Druid daemon). Frame authentication allocates nothing, so a forged
+  # Ported from the Druid daemon. Frame authentication allocates nothing, so a forged
   # all-zero-tag frame is refused even when the buffer it once allocated is made to fail; a payload declared but not sent is not
   # allocated before the frame is authenticated; and a key under 16 bytes is refused at start-up.
   local d key conf sock pid log hex i
@@ -1241,7 +1329,7 @@ gate_35_frame_auth() {
   done
   if [ "$bad" -eq 0 ]; then pass "35 frame_auth: keys of 1, 8 and 15 bytes are refused at start-up"
   else fail "35 frame_auth: $bad short key(s) were accepted"; fi
-  # SECURITY_AUDIT.md 3.12: without FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE the destructive ledger calls are refused (and logged); flush is not gated.
+  # Without FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE the destructive ledger calls are refused (and logged); flush is not gated.
   if true; then
     printf '%s\n' "$(openssl rand -hex 32)" > "$key"; rm -f "$sock"
     env -u FRACTALSQL_LEDGER_ALLOW_DESTRUCTIVE "$HERE/service/build/fractalsqld" -c "$conf" </dev/null >"$d/off.log" 2>&1 &
@@ -1339,6 +1427,174 @@ gate_32_plugin_sig_vendored() {
   pass "32 plugin_sig_vendored: all $n vendored plugins have a 64-byte .sig beside them"
 }
 
+# 37 audit_regress: VK-01 and VK-02 over the helpers in src/fv_common.h (tests/audit_regress.c).
+#   VK-01  the CSV renderer for FRACTAL.OPTIMIZE.MULTIMODAL's mu/cov writes within its buffer for the longest %.9g of a double
+#   VK-02  the "_actor" and "=>" rejections search with a bounded scan, not the GNU-only memmem (implicitly declared without
+#          _GNU_SOURCE, absent on MinGW)
+# Built with ASan + UBSan when a real clang is present (a write past the buffer must fail, not pass by luck), else plain.
+gate_37_audit_regress() {
+  local cc="cc" san="" c out bin="$TMPROOT/fsql_audit_regress_$$"
+  for c in clang clang-19 clang-18 clang-17 clang-16 clang-15 clang-14; do
+    command -v "$c" >/dev/null 2>&1 && "$c" --version 2>/dev/null | grep -q "clang version" && { cc="$c"; san="-fsanitize=address,undefined -fno-sanitize-recover=undefined"; break; }
+  done
+  [ "$(uname -s)" = Darwin ] && san="-fsanitize=address,undefined -fno-sanitize-recover=undefined"
+  # shellcheck disable=SC2086
+  if ! "$cc" -std=gnu11 -Wall -Wextra -O1 -g $san -DFRACTALSQL_VERSION='"0"' -Iinclude -Isrc tests/audit_regress.c -lm -o "$bin" 2>"$bin.log"; then
+    sed 's/^/         /' "$bin.log" | tail -8; fail "37 audit_regress: tests/audit_regress.c did not build"; rm -f "$bin" "$bin.log"; return
+  fi
+  if out=$(setarch "$(uname -m)" -R "$bin" 2>&1 || "$bin" 2>&1) && [[ "$out" == *" 0 failure(s)"* ]]; then
+    pass "37 audit_regress: $(grep -o '[0-9]* check(s)' <<< "$out" | head -1) (VK-01 csv rendering bounded, VK-02 bounded substring search)"
+  else
+    printf '%s\n' "$out" | tail -8 | sed 's/^/         /'; fail "37 audit_regress: see the output above"
+  fi
+  rm -f "$bin" "$bin.log"
+}
+
+# 38 precision: every SQL-visible distance accumulates in double, in a fixed sequential order, and is returned as a
+#     double. The gate compares the module's answers with the same arithmetic in Python, bit for bit.
+gate_38_precision() { run_py_gate 38 precision; }
+
+# 39 the native IVF index: FRACTAL.INDEX.CREATE / .REBUILD / .DROP / .INFO and the indexed FRACTAL.SEARCH. The gate
+#     includes the "index actually used" check (the rows the index scanned are far below the corpus size).
+gate_39_index() {
+  run_py_gate 39 index
+  # agent_use_index: a server loaded with agent-use-index yes (and the partial mode, so the agents answer without a reasoner)
+  if spawn_server idx39 agent-use-index yes agent-partial-reasoning-fail yes; then
+    FSQL_PHASE=agents run_py_gate 39 index "$SP_PORT" "$SP_PID" "$SP_LOG"
+    stop_server "$SP_PID"
+  else
+    fail "39 index: could not start a server with agent-use-index yes"
+  fi
+  # auto: an index only when it is ready and the key has at least agent-index-min-rows rows
+  if spawn_server idx39b agent-use-index auto agent-index-min-rows 100 agent-partial-reasoning-fail yes; then
+    FSQL_PHASE=agents run_py_gate 39 index "$SP_PORT" "$SP_PID" "$SP_LOG"
+    stop_server "$SP_PID"
+  else
+    fail "39 index: could not start a server with agent-use-index auto"
+  fi
+  if spawn_server idx39c agent-use-index auto agent-partial-reasoning-fail yes; then
+    FSQL_PHASE=autosmall run_py_gate 39 index "$SP_PORT" "$SP_PID" "$SP_LOG"
+    stop_server "$SP_PID"
+  else
+    fail "39 index: could not start a server with agent-use-index auto (default row threshold)"
+  fi
+  expect_load_refused "agent-use-index needs yes, no or auto" agent-use-index maybe
+  expect_load_refused "agent-index-min-rows needs an integer" agent-index-min-rows lots
+}
+
+# 40 the naming surface: the table-free convergence function was renamed fractal_sfs_converge (and fractal_search_debug
+#     to fractal_sfs_converge_debug); the old names are failing stubs, not aliases.
+gate_40_rename() { run_py_gate 40 rename; }
+
+# ---------------------------------------------------------------------------
+# Gates 42-46: the scripted-reply, ledger-payload, id-emission, fault-sweep and
+# kit-mutation gates -- the counterparts of the same gates in the SQLite and
+# PostgreSQL columns.
+#
+# They drive the module over RESP against a fractalsqld that already has
+# fractalsql.so loaded. The scripted-reply and id-emission gates need the
+# daemon to answer with a SCRIPTED model reply, so they run it with the
+# scripted plugin (tests/scripted_reasoning_plugin.c) instead of the vendored
+# one.
+# ---------------------------------------------------------------------------
+
+# The scripted plugin, built once: a reasoning plugin whose replies come from
+# a script the driver writes, so a test chooses exactly what the extension has
+# to parse.
+build_scripted_plugin() {
+  local plat="$1" so="$TMPROOT/fractalsql_scripted_plugin.so"
+  [ -f "$so" ] && { echo "$so"; return 0; }
+  cc -shared -fPIC -std=c99 -I"$HERE/include/$plat" -I"$HERE/include" \
+     "$HERE/tests/scripted_reasoning_plugin.c" -o "$so" 2>"$TMPROOT/scripted_plugin_build.log" \
+     || { cat "$TMPROOT/scripted_plugin_build.log" >&2; return 1; }
+  echo "$so"
+}
+
+# A daemon that answers from the scripted plugin. The script file is named in
+# FSQL_SCRIPT, which the plugin reads (the daemon's environment is fixed for
+# its whole life, so the driver changes the FILE, not the environment).
+start_scripted_daemon() {
+  local name="$1" plug
+  plug="$(build_scripted_plugin "$(uname -s | tr '[:upper:]' ':lower:')-$(uname -m)")" || return 1
+  D_PLUGIN="$plug" FSQL_SCRIPT="$TMPROOT/fractalsql_bt_script.txt" start_daemon "$name"
+}
+
+gate_42_scripted_replies() {
+  if [ -z "$(find_daemon)" ]; then skip "42 scripted_replies (no fractalsqld)"; return; fi
+  [ -f "$HERE/tests/vk_scripted_replies.py" ] || { skip "42 scripted_replies (tests/vk_scripted_replies.py not present)"; return; }
+  start_scripted_daemon scripted || { fail "42 scripted_replies: fractalsqld did not start"; return; }
+  if spawn_server scripted daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20; then
+    FSQL_SCRIPT="$TMPROOT/fractalsql_bt_script.txt"       run_py_driver tests/vk_scripted_replies.py scripted_replies --host 127.0.0.1 --port "$SP_PORT"
+  else
+    fail "42 scripted_replies: could not start the server"
+  fi
+}
+
+gate_43_ledger_payloads() {
+  if [ -z "$(find_daemon)" ]; then skip "43 ledger_payloads (no fractalsqld)"; return; fi
+  [ -f "$HERE/tests/vk_ledger_payloads.py" ] || { skip "43 ledger_payloads (tests/vk_ledger_payloads.py not present)"; return; }
+  # The audit chain is enterprise-gated: the mock core stands in when the real
+  # library is not vendored here.
+  local plat ent
+  plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+  ent="${FSQL_ENTERPRISE_LIB:-$HERE/include/$plat/libfractalsql-enterprise-sovereign-c.so}"
+  if [ ! -f "$ent" ]; then
+    ent="$TMPROOT/mock_enterprise_core.so"
+    cc -shared -fPIC -std=c99 -I"$HERE/include/$plat" -I"$HERE/include" "$HERE/tests/mock_enterprise_core.c" -o "$ent" 2>"$TMPROOT/mock_ent_build.log" \
+      || { cat "$TMPROOT/mock_ent_build.log" >&2; fail "43 ledger_payloads: the mock enterprise core did not build"; return; }
+  fi
+  FRACTALSQL_ENTERPRISE_LIB="$ent" FRACTALSQL_ENTERPRISE_LEDGER_PATH="$TMPROOT/ledger43.dat" start_daemon ledger43 \
+    || { fail "43 ledger_payloads: fractalsqld did not start with the enterprise library"; return; }
+  if spawn_server ledger43 daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20; then
+    run_py_driver tests/vk_ledger_payloads.py ledger_payloads --host 127.0.0.1 --port "$SP_PORT"
+  else
+    fail "43 ledger_payloads: could not start the server"
+  fi
+}
+
+gate_44_id_emission() {
+  if [ -z "$(find_daemon)" ]; then skip "44 id_emission (no fractalsqld)"; return; fi
+  [ -f "$HERE/tests/vk_id_emission.py" ] || { skip "44 id_emission (tests/vk_id_emission.py not present)"; return; }
+  start_scripted_daemon idemission || { fail "44 id_emission: fractalsqld did not start"; return; }
+  if spawn_server idemission daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20; then
+    FSQL_SCRIPT="$TMPROOT/fractalsql_bt_script.txt"       run_py_driver tests/vk_id_emission.py id_emission --host 127.0.0.1 --port "$SP_PORT"
+  else
+    fail "44 id_emission: could not start the server"
+  fi
+}
+
+gate_45_oom_sweep() {
+  if [ -z "$(find_daemon)" ]; then skip "45 oom_sweep (no fractalsqld)"; return; fi
+  [ -f "$HERE/tests/vk_oom_sweep.py" ] || { skip "45 oom_sweep (tests/vk_oom_sweep.py not present)"; return; }
+  # The allocation-failure hook lives in the injection flavor of the module
+  # (-DFV_OOM_INJECT, src/fv_oom.c) -- the same build gate 11 uses.
+  local ver plat so="$TMPROOT/fractalsql_oom.so" ldf core
+  ver="$(tr -d '[:space:]' < "$HERE/VERSION")"
+  plat="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
+  core="$HERE/include/$plat/libfractalsql-${CORE_VARIANT:-community-sovereign-c}.a"
+  [ -f "$core" ] || { fail "45 oom_sweep: no core archive for this host ($core)"; return; }
+  ldf="-shared -Wl,--exclude-libs,ALL"
+  [ "$(uname -s)" = "Darwin" ] && ldf="-dynamiclib -undefined dynamic_lookup"
+  if ! cc -O1 -g -fPIC $ldf -DFV_OOM_INJECT "-DFRACTALSQL_VERSION=\"$ver\"" -I"$HERE/include" \
+        "$HERE"/src/*.c "$core" -lm -ldl -lpthread -o "$so" 2>"$TMPROOT/oom_sweep_build.log"; then
+    sed 's/^/         /' "$TMPROOT/oom_sweep_build.log" | tail -15; fail "45 oom_sweep: the injection build failed"; return
+  fi
+  SP_MODULE="$so" spawn_server oomsweep threads 2 || { fail "45 oom_sweep: could not start the server"; return; }
+  run_py_driver tests/vk_oom_sweep.py oom_sweep --host 127.0.0.1 --port "$SP_PORT"
+}
+
+gate_46_kit_mutation() {
+  if [ -z "$(find_daemon)" ]; then skip "46 kit_mutation (no fractalsqld)"; return; fi
+  [ -f "$HERE/tests/vk_kit_mutation.py" ] || { skip "46 kit_mutation (tests/vk_kit_mutation.py not present)"; return; }
+  start_daemon kitmut || { fail "46 kit_mutation: fractalsqld did not start"; return; }
+  if spawn_server kitmut daemon-socket "$D_SOCK" daemon-key-file "$D_KEY" daemon-timeout-s 20; then
+    run_py_driver tests/vk_kit_mutation.py kit_mutation --host 127.0.0.1 --port "$SP_PORT"
+  else
+    fail "46 kit_mutation: could not start the server"
+  fi
+}
+
+
 gate_31_mcp_conformance() {
   [ -f "$HERE/mcp/tests/mcp_conformance.py" ] || { skip "31 mcp_conformance (the conformance driver is not present)"; return; }
   local mcp_py="$PY"
@@ -1423,7 +1679,7 @@ gate_17_kits() {
     pass "17 demos: $name ran clean and reproduced its headline result ($n checks)"
   done
   [ "$verts" -eq 44 ] && pass "17 demos: all $verts demo-vertical-* files ran" || fail "17 demos: found $verts demo-vertical-* file(s), expected exactly 44 (42 verticals + 2 Valkey-native)"
-  [ "$ran" -eq 50 ] && pass "17 demos: all $ran demo files ran (44 verticals, demo, demo-agents, demo-fractal-vector, demo-diversify, response-modes, enterprise-qtl-audit)" || fail "17 demos: found $ran demo file(s), expected exactly 50"
+  [ "$ran" -eq 52 ] && pass "17 demos: all $ran demo files ran (44 verticals, demo, demo-agents, demo-fractal-vector, demo-fractal-index, demo-chunking, demo-diversify, response-modes, enterprise-qtl-audit)" || fail "17 demos: found $ran demo file(s), expected exactly 52"
 }
 
 gate_10_lifecycle() {
@@ -1547,6 +1803,16 @@ if [ "$need_server" -eq 1 ]; then
         34) gate_34_session_params ;;
         35) gate_35_frame_auth ;;
         36) gate_36_mcp_audit_http ;;
+        37) gate_37_audit_regress ;;
+        38) gate_38_precision ;;
+        39) gate_39_index ;;
+        40) gate_40_rename ;;
+        41) gate_41_analyst_scan ;;
+        42) gate_42_scripted_replies ;;
+        43) gate_43_ledger_payloads ;;
+        44) gate_44_id_emission ;;
+        45) gate_45_oom_sweep ;;
+        46) gate_46_kit_mutation ;;
       esac
     done
   fi

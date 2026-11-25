@@ -6,7 +6,7 @@
 
 FractalSQL for Valkey ships **21 agent commands**: autonomous, self-correcting routines that compose the module's
 Discovery, Analytics and Cognition primitives into end-to-end workflows. Sixteen are ready-made recipes and five are the
-building blocks the recipes are made from. (`DATA_ANALYST` answers a question from a [valkey-search](https://github.com/valkey-io/valkey-search) index, so it needs that module loaded.) Each agent is a *recipe* for a recurring agentic pattern: "drift on a metric
+building blocks the recipes are made from. (`DATA_ANALYST` answers a question from a [valkey-search](https://github.com/valkey-io/valkey-search) index when that module is loaded, and by scanning the keys under a prefix when it is not.) Each agent is a *recipe* for a recurring agentic pattern: "drift on a metric
 series", "match a task to the best capable target", "block an action near a known-bad state". You pick the recipe that
 matches your problem, point it at your keys, and get back real computed results plus a human-readable read.
 
@@ -58,7 +58,7 @@ Pick by the problem shape, not by the command name.
 | "Which node should this workload land on (with vector refinement)?" | `SCHEDULE_WORKLOAD` | SFS refine + nearest node, then a rationale | reasoner |
 | "Should I block this proposed action (is it near a known-bad state)?" | `OUTLIER_INTERCEPT` | distance-to-bad-state barrier, then a reason | reasoner |
 | "Triage an entity against a cohort + baseline-to-current drift" | `PATIENT_DETERIORATION_TRIAGE` | cohort search + drift on the change, then a triage | reasoner |
-| "Ask a natural-language question over my data" | `DATA_ANALYST` | question to query to result to analysis | reasoner, valkey-search |
+| "Ask a natural-language question over my data" | `DATA_ANALYST` | question to filter to result to analysis | reasoner (valkey-search optional) |
 | "Recall similar past memories, restricted by a metadata filter" | `RECALL_HYBRID` | cohort-restricted vector recall | no |
 | "Recommend diverse items, avoiding recently-rejected ones" | `RECOMMEND_DIVERSE` | repulsion-diverse top-k | no |
 | "Audit my recommender's diversity health" | `FEEDBACK_AUDIT` | diversify loop + collapse diagnostics | no |
@@ -89,6 +89,10 @@ the narrative with `null`, adding `reasoning_step_failed` with the error:
 This is the shape of every example reply below, because the examples were run without a reasoner. With one configured the
 narrative field holds its text and `reasoning_step_failed` is absent. `SEARCH_AGENT` and `RAG_AGENT` are the exception: by default a reasoning failure after retrieval is an **error**; load the module with
 `agent-partial-reasoning-fail yes` to get the retrieval plus `reasoning_step_failed` instead.
+
+### Searching through an index
+
+`ROUTE_TASK`, `SCHEDULE_WORKLOAD`, `OUTLIER_INTERCEPT` (cosine) and `RECALL_HYBRID` search through an index, `RECALL_HYBRID` over its cohort. `ROUTE_TASK`, `SCHEDULE_WORKLOAD` and `OUTLIER_INTERCEPT` (cosine) find the single nearest row, and by default they scan the key exactly. Load the module with `agent-use-index yes` and, when a [`FRACTAL.INDEX`](api-discovery.md#the-native-ivf-index) exists on the key, they search through it instead (the first index of the key by name, or the one named by the `INDEX <name>` option, which is an error when that index does not exist; `FRACTAL.SEARCH.AGENT`, `FRACTAL.RAG.AGENT` and `FRACTAL.AGENT.RECALL_HYBRID` take it too; rows appended after the build are scanned exactly). Every distance is still the exact cosine. The option takes `no` (the default), `yes` and `auto`: with `auto` the agents go through the index only when it is ready (no rows were appended since the build) and the key has at least `agent-index-min-rows` rows (default 10000); otherwise they scan exactly. The option is off by default because an index can, rarely, pick a different nearest row than the exact scan. With no index on the key, or `METRIC l2`, the agents scan exactly. `FRACTAL.SEARCH.AGENT` and `FRACTAL.RAG.AGENT` follow the same option and report `used_index`; a corpus key carries no metadata columns, so their filter is the `IDS` restriction, which always scans exactly. `FRACTAL.INDEX.INFO` reports the agent's search under `last_search`.
 
 ---
 
@@ -155,7 +159,7 @@ FRACTAL.AGENT.ALLOCATE mu cov cardinality [context_json]
 **Problem it solves.** Matches a task embedding to the best-capable target and tracks a token budget.
 
 ```
-FRACTAL.AGENT.ROUTE_TASK capability_key task budget [COST_PER_ROUTE n] [IDS hash]
+FRACTAL.AGENT.ROUTE_TASK capability_key task budget [COST_PER_ROUTE n] [IDS hash] [INDEX name]
 ```
 
 **Inputs.**
@@ -217,7 +221,7 @@ FRACTAL.AGENT.OUTLIER_INTERCEPT history_key state threshold [METRIC cosine|l2]
 **Problem it solves.** Recalls the most similar past rows inside a cohort selected by a strict metadata filter.
 
 ```
-FRACTAL.AGENT.RECALL_HYBRID corpus_key query [K n] [IDS hash] [CONTENT hash] [FILTER hash value]
+FRACTAL.AGENT.RECALL_HYBRID corpus_key query [K n] [IDS hash] [CONTENT hash] [FILTER hash value] [INDEX name]
 ```
 
 **Inputs.**
@@ -272,37 +276,53 @@ FRACTAL.AGENT.RECOMMEND_DIVERSE catalog_key query [K n] [IDS hash]
 **Notes.** Category: `@read`.
 
 ### Data analyst: `FRACTAL.AGENT.DATA_ANALYST`
-**Problem it solves.** Answer a plain-language question about the documents in a valkey-search index: the model writes the query, the module runs it, and the model reads the result.
+**Problem it solves.** Answer a plain-language question about your hashes: the model writes a filter, the module runs it, and the model reads the result. It works two ways. With [valkey-search](https://github.com/valkey-io/valkey-search) loaded it queries an index (fast, with a real secondary index). Without it, it scans the keys under a prefix and applies the filter itself (bounded, no extra module).
 
 ```
-FRACTAL.AGENT.DATA_ANALYST index question [MAX_ATTEMPTS n] [LIMIT n] [CONTEXT json]
+FRACTAL.AGENT.DATA_ANALYST index question [MAX_ATTEMPTS n] [LIMIT n] [CONTEXT json] [MODE AUTO|SEARCH|SCAN] [PREFIX p]
 ```
 
 **Inputs.**
 
-- `index`: the name of a valkey-search index (letters, digits and `_ : . -`, up to 128 bytes)
+- `index`: the name of a valkey-search index (letters, digits and `_ : . -`, up to 128 bytes). In scan mode it is the key prefix to scan, unless `PREFIX` is given
 - `question`: the question, 1 to 4096 bytes
 - `MAX_ATTEMPTS`: how many times a rejected query is fed back to the model to correct, 1 to 5 (default 2)
 - `LIMIT`: the most rows returned, 1 to 100 (default 20); `total` still reports how many matched
 - `CONTEXT`: optional JSON of extra facts for the model
+- `MODE`: `AUTO` (the default) uses valkey-search when it is loaded and scans otherwise; `SEARCH` requires valkey-search and says so when it is missing; `SCAN` never uses it. A missing index with valkey-search loaded is still an error in `AUTO`, because a mistyped index name is not a key prefix
+- `PREFIX`: the key prefix to scan (letters, digits and `_ : . -`, up to 128 bytes). Giving it selects scan mode
 
 **Returns** a JSON document:
 
-- `generated_query`: the filter expression the model wrote
-- `result_json`: `{"total": n, "rows": [{"key": ..., "fields": {...}}]}`, as valkey-search returned it. Binary fields such as vectors are reported as `"<binary N bytes>"`, not printed
+- `generated_query`: what the model wrote: a valkey-search filter expression, or in scan mode the JSON filter
+- `engine`: `"valkey-search"` or `"scan"`
+- `result_json`: `{"total": n, "rows": [{"key": ..., "fields": {...}}]}`. Binary fields such as vectors are reported as `"<binary N bytes>"`, not printed. In scan mode it also carries `scanned` (hashes examined) and `complete` (`false` when the key budget stopped the scan before the end)
 - `analysis`: the model's reading of the result, or `null` with `reasoning_step_failed` set if the reasoner could not be reached (the rows are still returned)
 
 ```
 > FRACTAL.AGENT.DATA_ANALYST people "who is older than thirty?" LIMIT 2
-{"analysis":"...","generated_query":"@age:[(30 +inf]","result_json":{"total":3,"rows":[{"key":"d:1","fields":{"__v_score":"1","name":"bob","age":"31","v":"<binary 8 bytes>"}},...]}}
+{"analysis":"...","generated_query":"@age:[(30 +inf]","engine":"valkey-search","result_json":{"total":3,"rows":[{"key":"d:1","fields":{"__v_score":"1","name":"bob","age":"31","v":"<binary 8 bytes>"}},...]}}
+
+> FRACTAL.AGENT.DATA_ANALYST d: "who is older than thirty?" MODE SCAN
+{"analysis":"...","generated_query":"{\"field\":\"age\",\"op\":\">\",\"value\":30}","engine":"scan","result_json":{"total":3,"rows":[...],"scanned":4,"complete":true}}
 ```
+
+**The scan filter.** In scan mode the model writes one small JSON filter, and the module evaluates it:
+
+```
+filter := {"all":[filter, ...]}  |  {"any":[filter, ...]}  |  {"field":"age","op":">=","value":30}
+op     := =  !=  <  <=  >  >=  in  prefix  contains        ("in" takes an array of up to 16 values)
+```
+
+Numbers compare as numbers, and a field that is not a number never matches `<`, `<=`, `>` or `>=`. Text compares exactly and is case sensitive. A field the row does not have matches only `!=`. The filter is checked before it runs: at most 2048 bytes, 32 parts, 3 levels deep, only the keys and operators above, and every field must be one that appears in the sample rows the model was shown. A rejected filter is fed back to the model with the reason, up to `MAX_ATTEMPTS`.
 
 **Notes.**
 
-- **The model never chooses a command.** It supplies only a valkey-search filter expression. The module builds the command itself, always `FT.SEARCH <index> <expression> ... LIMIT 0 <n> DIALECT 2`, and passes the expression as one argument. An expression that is empty, longer than 512 bytes, contains a control or non-ASCII character, or contains `=>` is refused and fed back; if no attempt is accepted the command returns an error, and nothing else is run.
-- **It runs as you.** The query is executed with the calling user's own ACL, so the agent adds no privilege. The caller needs `+ft.info` and `+ft.search`, and valkey-search additionally requires the user to be allowed its `@search` category.
-- **It needs a vector field.** valkey-search requires every query to include a nearest-neighbour clause, so the index must have a vector field; the module adds the clause for you with a neutral vector, and the filter is what selects rows.
-- **Where it will not run.** Inside `MULTI`, a script or a function (there is no calling client to take the user from), or without a configured `fractalsqld` daemon, and it needs the valkey-search module loaded.
+- **The model never chooses a command.** It supplies only a filter. The module builds every command itself: in search mode always `FT.SEARCH <index> <expression> ... LIMIT 0 <n> DIALECT 2` (the expression is passed as one argument; one that is empty, longer than 512 bytes, contains a control or non-ASCII character, or contains `=>` is refused and fed back); in scan mode only `SCAN`, with `MATCH`, `COUNT` and `TYPE hash`, then `HGETALL` on each key. If no attempt is accepted, the command returns an error.
+- **It runs as you.** Every command is executed with the calling user's own ACL, so the agent adds no privilege. Search mode needs `+ft.info` and `+ft.search` (and valkey-search additionally requires the `@search` category). Scan mode needs `+scan` and `+hgetall`; a key the caller cannot read is invisible: it is not returned and not counted, and a caller who can read nothing under the prefix gets "no hashes were found". Neither mode works around a refusal.
+- **Scan mode is bounded.** The scan examines at most 10,000 hashes per question, in steps of 100 keys so the server is never held for long; `complete: false` says the budget stopped it. A prefix that matches more than that needs valkey-search (a real secondary index) or a narrower prefix. Scan mode reads only hashes, and shows a handful of them to the model to learn the field names.
+- **Search mode needs a vector field.** valkey-search requires every query to include a nearest-neighbour clause, so the index must have a vector field; the module adds the clause for you with a neutral vector, and the filter is what selects rows.
+- **Where it will not run.** Inside `MULTI`, a script or a function (there is no calling client to take the user from), or without a configured `fractalsqld` daemon.
 - Category: `@dangerous`, like the other agents that send data to a provider.
 
 ### Patient deterioration triage: `FRACTAL.AGENT.PATIENT_DETERIORATION_TRIAGE`
@@ -712,7 +732,8 @@ FRACTAL.SEARCH.AGENT corpus_key query_text dim [POPULATION n] [ITERATIONS n] [CO
 **Returns:**
 
 - `answer`: the reasoner's answer
-- `source_doc_ids`: the hit row indexes
+- `source_row_ids`: the ids of the rows the answer was drawn from, best first: the values of the `IDS` hash when you passed one, otherwise the row indexes. Use these to cite a source.
+- `used_index`: `true` when the rows came through an index (the module loaded with `agent-use-index yes`, or `auto` with a ready index on a large enough key, and no `IDS` restriction); the distances are exact either way, and an index answer is the nearest rows rather than the population-search selection
 - `execution_time_ms`: the elapsed time of the call, in milliseconds
 
 **Example.** `FRACTAL.SEARCH.AGENT kb "why did latency rise?" 768 POPULATION 50 CONTENT kb:text IDS kb:id`
@@ -734,7 +755,7 @@ FRACTAL.RAG.AGENT corpus_key query_text dim [CONTENT hash] [IDS hash]
 
 **Returns:**
 
-- `answer / source_doc_ids / execution_time_ms`: as in search_agent
+- `answer / source_row_ids / used_index / execution_time_ms`: as in search_agent
 
 **Example.** `FRACTAL.RAG.AGENT kb "why did latency rise?" 768 CONTENT kb:text`
 

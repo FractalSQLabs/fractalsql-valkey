@@ -2,7 +2,7 @@
 %global confdir  /etc/valkey/modules-available
 
 Name:           fractalsql-valkey
-Version:        2.0.2
+Version:        2.0.3
 Release:        1%{?dist}
 Summary:        Stochastic Fractal Search module for Valkey
 
@@ -106,13 +106,15 @@ Verify:
 EOF
 
 %changelog
-* Tue Nov 17 2026 FractalSQLabs <ops@fractalsqlabs.io> - 2.0.2-1
+* Wed Nov 25 2026 FractalSQLabs - 2.0.3-1
+- 2.0.3 release.
+* Tue Nov 17 2026 FractalSQLabs - 2.0.2-1
 - 2.0.2 release.
-* Sun Nov 15 2026 FractalSQLabs <ops@fractalsqlabs.io> - 2.0.1-1
+* Sun Nov 15 2026 FractalSQLabs - 2.0.1-1
 - 2.0.1 release: package metadata (maintainer, vendor, URL) and the install message.
-* Sat Nov 14 2026 FractalSQLabs <ops@fractalsqlabs.io> - 2.0.0-1
+* Sat Nov 14 2026 FractalSQLabs - 2.0.0-1
 - 2.0.0 release.
-* Fri Oct 30 2026 FractalSQLabs <ops@fractalsqlabs.io> - 1.0.1-1
+* Fri Oct 30 2026 FractalSQLabs - 1.0.1-1
 - FRACTAL.SEARCH and FRACTAL.EXPLORE now refuse a query or corpus that
   contains a NaN or Inf (previously accepted and passed to the optimizer).
 - A NULL or failed result is reported as an error; core error text is
@@ -120,7 +122,7 @@ EOF
 - The two commands share one input loader (they had drifted).
 - The module no longer exports the statically linked core's symbols.
 - Re-vendored fractalsql-core (196be156).
-* Sat Apr 18 2026 FractalSQLabs <ops@fractalsqlabs.io> - 1.0.0-1
+* Sat Apr 18 2026 FractalSQLabs - 1.0.0-1
 - Initial Factory-standardized release for Valkey 7.2 / 8.0 / 8.1.
   Static LuaJIT, zero-dependency posture. One .so per arch covers
   every currently-shipping Valkey major. Verified on AMD64 and ARM64.

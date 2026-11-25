@@ -145,7 +145,7 @@ jobs:
 
               VERSION=$(docker exec "${C}" valkey-cli FRACTAL.VERSION)
               echo "[${TAG}] version: ${VERSION}"
-              test "${VERSION}" = "2.0.2"
+              test "${VERSION}" = "2.0.3"
 
               # Convergence check. query = (0.6, 0.8). Cosine distance
               # is magnitude-invariant — every point on the ray through
@@ -532,7 +532,7 @@ jobs:
           install -m 0755 "dist/${{ matrix.platform_tag }}/fractalsql-valkey-mcp" "${STAGE}/mcp/fractalsql-valkey-mcp"
           install -m 0644 mcp/.mcp-schema-lock mcp/.mcp-safety-annotations-lock mcp/README.md mcp/RUN.txt mcp/manifest.json "${STAGE}/mcp/"
           cat > "${STAGE}/README.txt" <<EOF
-          fractalsql-valkey 2.0.2 Community (${{ matrix.platform_tag }})
+          fractalsql-valkey 2.0.3 Community (${{ matrix.platform_tag }})
 
           This archive ships an UNSIGNED Valkey module for macOS.
 
@@ -553,7 +553,7 @@ jobs:
           5. Verify:
                  valkey-cli MODULE LIST
                  valkey-cli FRACTAL.EDITION    # -> "Community"
-                 valkey-cli FRACTAL.VERSION    # -> "2.0.2"
+                 valkey-cli FRACTAL.VERSION    # -> "2.0.3"
 
           The optional MCP server (mcp/fractalsql-valkey-mcp) is separate from the module:
               xattr -d com.apple.quarantine mcp/fractalsql-valkey-mcp      # unsigned release

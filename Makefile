@@ -50,8 +50,24 @@ LDFLAGS = -shared -flto -Wl,--exclude-libs,ALL -lm -ldl -lpthread
 endif
 
 TARGET = fractalsql.so
-SRCS   = src/module.c src/fv_pool.c src/fv_search.c src/fv_vector.c src/fv_analytics.c src/fv_daemon.c src/fv_agents.c src/fv_session.c src/fv_oom.c
+SRCS   = src/module.c src/fv_pool.c src/fv_search.c src/fv_vector.c src/fv_analytics.c src/fv_daemon.c src/fv_agents.c src/fv_session.c src/fv_oom.c src/fv_index.c src/fv_feature.c
 OBJS   = $(SRCS:.c=.o)
+
+# The files that carry the float paths (the ones that include src/fsql_precision.h) are compiled with contraction and
+# vectorisation OFF, so every distance, norm and cosine is a fixed sequence of IEEE double operations (the precision
+# contract R2 and R3).
+#
+# These are TARGET-SPECIFIC variables, and that is not a style choice. The obvious form,
+# $(FP_CFLAGS_$(*)) in the recipe, expands to NOTHING: make expands a variable NAME once, and the
+# automatic variable inside that name is not expanded with it, so every float path was silently
+# compiled with the compiler's default float behaviour. gcc contracts a*b+c into an FMA by default,
+# and arm64 always has one, so the squared L2 distance stopped matching the sequential double
+# reference there (and the gate that checks it failed on linux/arm64 and on the macOS sanitizer
+# build). A target-specific variable does reach the recipe of a pattern rule, and it adds to
+# whatever CFLAGS the caller passed, so a sanitizer build that passes its own CFLAGS on the
+# command line keeps these.
+FP_FLAGS   = -ffp-contract=off -fno-tree-vectorize
+src/fv_vector.o src/fv_search.o src/fv_index.o src/fv_agents.o: FP_CFLAGS += $(FP_FLAGS)
 
 # Default Valkey module dir on Debian / Ubuntu / most distros.
 MODULE_DIR ?= /usr/lib/valkey/modules
@@ -104,7 +120,7 @@ $(TARGET): $(OBJS) $(CORE_ARCHIVE) verify-vendor
 # that, objects built against an older struct layout link into a module that crashes at run time. VERSION is a
 # prerequisite too: it is baked into the objects with -DFRACTALSQL_VERSION, so a bump must rebuild them.
 %.o: %.c include/fractalsql.h include/redismodule.h VERSION
-	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(FP_CFLAGS) -MMD -MP -c $< -o $@
 
 -include $(OBJS:.o=.d)
 

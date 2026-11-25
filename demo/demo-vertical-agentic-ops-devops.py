@@ -43,5 +43,5 @@ k.expect("the incident goes to capability 4 and spends the default 150 tokens", 
 k.section("5. Retrieve then reason")
 rag = k.optional_js("RAG_AGENT (embeds the question)", "FRACTAL.RAG.AGENT", "kit:ops:caps", "why did the checkout latency rise?", 6)
 if rag is not None:
-    k.expect("the answer cites source rows", len(rag["source_doc_ids"]) >= 1)
+    k.expect("the answer cites source rows", len(rag["source_row_ids"]) >= 1)
 k.done()

@@ -23,7 +23,7 @@ namespace fsqlmcp
 {
     // The plugin's own version, and the module version it was built and tested against.
     static const char* const kMcpPluginName       = "fractalsql-valkey-mcp";
-    static const char* const kEngineVersionExpect = "2.0.2";
+    static const char* const kEngineVersionExpect = "2.0.3";
 
     // One RESP2 reply. An error reply is returned as a value here; Db::call turns it into a ToolError.
     struct Resp

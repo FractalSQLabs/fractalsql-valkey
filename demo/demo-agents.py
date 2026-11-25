@@ -54,6 +54,17 @@ r = k.js(A + "FEEDBACK_AUDIT", "demo:cohort", q, "demo:cohort")
 k.show("FEEDBACK_AUDIT", "diversity_quotient %s, enabled %s" % (r["diversity_quotient"], r["explanation"]["diversify_enabled"]))
 k.expect("the diversify layer ran", r["explanation"]["diversify_enabled"] is True)
 
+k.section("A question over your hashes (needs a model; valkey-search is optional)")
+for i, (age, name, city) in enumerate([(25, "ann", "london"), (31, "bob", "paris"), (47, "cy", "london"), (52, "di", "berlin")]):
+    k.call("HSET", "demo:people:%d" % i, "age", age, "name", name, "city", city)
+# MODE SCAN never needs valkey-search: the model writes a small JSON filter and the module scans the keys under the prefix, as you.
+r = k.optional_js("DATA_ANALYST in scan mode", A + "DATA_ANALYST", "demo:people:", "who is older than thirty?", "MODE", "SCAN")
+if r is not None:
+    k.show("the filter the model wrote", r["generated_query"])
+    k.show("rows", ", ".join(sorted(x["key"] for x in r["result_json"]["rows"])) or "(none)")
+    k.expect("the scan engine answered and read all four hashes", r["engine"] == "scan" and r["result_json"]["scanned"] == 4 and r["result_json"]["complete"] is True)
+    k.expect("every row is one of the hashes under the prefix", all(x["key"].startswith("demo:people:") for x in r["result_json"]["rows"]))
+
 k.section("The narrative, if a daemon is configured")
 r = k.js(A + "REGIME_TRIAGE", "demo:shift", 64)
 k.show("rationale", (r.get("rationale") or ("skipped: " + str(r.get("reasoning_step_failed", ""))[:50]))[:70])

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Daniel Gardiner d/b/a FractalSQLabs
-"""Calls the ledger's reset_hard and flush on a running fractalsqld (SECURITY_AUDIT.md 3.12): the daemon's log shows the verdict.
+"""Calls the ledger's reset_hard and flush on a running fractalsqld: the daemon's log shows the verdict.
 
 usage: destructive_calls.py SOCKET KEYFILE [reset_only]
 """
